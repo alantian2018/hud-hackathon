@@ -132,6 +132,12 @@ class RouteResult:
         }
 
 
+@dataclass(frozen=True)
+class CnnFeatureConfig:
+    patch_radius: int = 3
+    include_wait_action: bool = True
+
+
 @dataclass
 class CarState:
     id: str
@@ -227,6 +233,21 @@ def _manhattan(a: tuple[int, int], b: tuple[int, int]) -> int:
     return abs(a[0] - b[0]) + abs(a[1] - b[1])
 
 
+def _top_cells(heatmap: list[list[float]], k: int) -> list[dict[str, float | int | list[int]]]:
+    cells = [
+        {"row": row, "col": col, "cell": [row, col], "value": float(heatmap[row][col])}
+        for row in range(len(heatmap))
+        for col in range(len(heatmap[row]))
+    ]
+    cells.sort(key=lambda item: float(item["value"]), reverse=True)
+    return cells[: max(0, k)]
+
+
+def _mean_heatmap_value(heatmap: list[list[float]]) -> float:
+    flat = [float(value) for row in heatmap for value in row]
+    return sum(flat) / max(1, len(flat))
+
+
 def _ensure_heatmap(heatmap: list[list[float]], grid: GridSpec, name: str) -> None:
     if len(heatmap) != grid.rows or any(len(row) != grid.cols for row in heatmap):
         raise ValueError(f"{name} must have shape {grid.rows}x{grid.cols}")
@@ -302,6 +323,75 @@ def _weighted_cell(
         if running >= pick:
             return cell
     return weights[-1][0]
+
+
+def _cell_from_payload(value: Any) -> tuple[int, int] | None:
+    if value is None:
+        return None
+    if isinstance(value, tuple) and len(value) == 2:
+        return int(value[0]), int(value[1])
+    if isinstance(value, list) and len(value) == 2:
+        return int(value[0]), int(value[1])
+    return None
+
+
+def _person_origin(person: PersonRequest | dict[str, Any]) -> tuple[int, int] | None:
+    if isinstance(person, PersonRequest):
+        return person.origin
+    return _cell_from_payload(person.get("origin") or person.get("pickup") or person.get("request_origin"))
+
+
+def _person_destination(person: PersonRequest | dict[str, Any]) -> tuple[int, int] | None:
+    if isinstance(person, PersonRequest):
+        return person.destination
+    return _cell_from_payload(person.get("destination") or person.get("dropoff") or person.get("request_destination"))
+
+
+def _person_to_agent_dict(person: PersonRequest | dict[str, Any]) -> dict[str, Any]:
+    if isinstance(person, PersonRequest):
+        return person.to_dict()
+    return dict(person)
+
+
+def _car_position(car: CarState | dict[str, Any]) -> tuple[int, int] | None:
+    if isinstance(car, CarState):
+        return car.position
+    return _cell_from_payload(car.get("grid_cell")) or _cell_from_payload(car.get("position"))
+
+
+def _car_status(car: CarState | dict[str, Any]) -> str:
+    if isinstance(car, CarState):
+        return car.status
+    return str(car.get("status", "idle"))
+
+
+def _car_id(car: CarState | dict[str, Any]) -> str:
+    if isinstance(car, CarState):
+        return car.id
+    return str(car.get("id") or car.get("car_id") or "unknown-car")
+
+
+def _car_route(car: CarState | dict[str, Any]) -> list[tuple[int, int]]:
+    raw_route = car.route if isinstance(car, CarState) else car.get("route", [])
+    route = []
+    for cell in raw_route or []:
+        parsed = _cell_from_payload(cell)
+        if parsed is not None:
+            route.append(parsed)
+    return route
+
+
+def _increment_grid(grid: list[list[float]], cell: tuple[int, int], amount: float = 1.0) -> None:
+    row, col = cell
+    if 0 <= row < len(grid) and 0 <= col < len(grid[row]):
+        grid[row][col] += amount
+
+
+def _normalized_count_grid(values: list[list[float]]) -> list[list[float]]:
+    high = max([value for row in values for value in row], default=0.0)
+    if high <= 0.0:
+        return values
+    return [[round(value / high, 6) for value in row] for row in values]
 
 
 def _poisson(lam: float, rng: random.Random, seed: int) -> int:
@@ -850,6 +940,290 @@ def build_car_grid(grid: Any, cars: list[CarState]) -> dict[str, Any]:
     }
 
 
+def candidate_next_cells(
+    grid: Any,
+    position: tuple[int, int],
+    include_wait: bool = True,
+) -> list[dict[str, Any]]:
+    spec = GridSpec.from_grid(grid)
+    row, col = position
+    raw_candidates = []
+    if include_wait:
+        raw_candidates.append(("WAIT", (row, col)))
+    raw_candidates.extend(
+        [
+            ("N", (row - 1, col)),
+            ("E", (row, col + 1)),
+            ("S", (row + 1, col)),
+            ("W", (row, col - 1)),
+        ]
+    )
+
+    candidates = []
+    for action, cell in raw_candidates:
+        if not spec.contains(cell):
+            continue
+        candidates.append(
+            {
+                "action": action,
+                "next_cell": [cell[0], cell[1]],
+                "next_intersection": f"G_{cell[0]}_{cell[1]}",
+            }
+        )
+    return candidates
+
+
+def build_cnn_feature_channels(
+    grid: Any,
+    demand_heatmap: list[list[float]],
+    traffic_heatmap: list[list[float]],
+    people: list[PersonRequest | dict[str, Any]],
+    cars: list[CarState | dict[str, Any]],
+    reservations: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    spec = GridSpec.from_grid(grid)
+    _ensure_heatmap(demand_heatmap, spec, "demand_heatmap")
+    _ensure_heatmap(traffic_heatmap, spec, "traffic_heatmap")
+
+    channels: dict[str, list[list[float]]] = {
+        "demand": [[round(_clip(float(v)), 6) for v in row] for row in demand_heatmap],
+        "traffic": [[round(_clip(float(v)), 6) for v in row] for row in traffic_heatmap],
+        "car_occupancy": _shape_like(spec),
+        "idle_car_occupancy": _shape_like(spec),
+        "active_pickups": _shape_like(spec),
+        "active_dropoffs": _shape_like(spec),
+        "reserved_targets": _shape_like(spec),
+    }
+
+    for car in cars:
+        position = _car_position(car)
+        if position is None or not spec.contains(position):
+            continue
+        _increment_grid(channels["car_occupancy"], position)
+        if _car_status(car) == "idle":
+            _increment_grid(channels["idle_car_occupancy"], position)
+
+    for person in people:
+        origin = _person_origin(person)
+        destination = _person_destination(person)
+        if origin and spec.contains(origin):
+            _increment_grid(channels["active_pickups"], origin)
+        if destination and spec.contains(destination):
+            _increment_grid(channels["active_dropoffs"], destination)
+
+    for reservation in (reservations or {}).values():
+        cell = None
+        if isinstance(reservation, dict):
+            cell = _cell_from_payload(reservation.get("next_cell") or reservation.get("target"))
+        else:
+            cell = _cell_from_payload(reservation)
+        if cell and spec.contains(cell):
+            _increment_grid(channels["reserved_targets"], cell)
+
+    for name in ("car_occupancy", "idle_car_occupancy", "active_pickups", "active_dropoffs", "reserved_targets"):
+        channels[name] = _normalized_count_grid(channels[name])
+
+    channel_names = list(channels.keys())
+    return {
+        "channel_names": channel_names,
+        "channels": [channels[name] for name in channel_names],
+        "shape": [len(channel_names), spec.rows, spec.cols],
+    }
+
+
+def local_patch_from_channels(
+    feature_payload: dict[str, Any],
+    center: tuple[int, int],
+    radius: int = 3,
+) -> dict[str, Any]:
+    channels = feature_payload["channels"]
+    channel_names = feature_payload["channel_names"]
+    rows = len(channels[0]) if channels else 0
+    cols = len(channels[0][0]) if rows else 0
+    size = radius * 2 + 1
+    patch = []
+    for channel in channels:
+        channel_patch = []
+        for row in range(center[0] - radius, center[0] + radius + 1):
+            patch_row = []
+            for col in range(center[1] - radius, center[1] + radius + 1):
+                if 0 <= row < rows and 0 <= col < cols:
+                    patch_row.append(channel[row][col])
+                else:
+                    patch_row.append(0.0)
+            channel_patch.append(patch_row)
+        patch.append(channel_patch)
+    return {
+        "center": [center[0], center[1]],
+        "radius": radius,
+        "shape": [len(channel_names), size, size],
+        "channel_names": channel_names,
+        "channels": patch,
+    }
+
+
+def greedy_next_cell_for_car(car: CarState | dict[str, Any]) -> tuple[int, int] | None:
+    position = _car_position(car)
+    if position is None:
+        return None
+    route = _car_route(car)
+    return route[0] if route else position
+
+
+def build_global_state_for_agent(
+    grid: Any,
+    timestep: int,
+    demand_heatmap: list[list[float]],
+    traffic_heatmap: list[list[float]],
+    people: list[PersonRequest | dict[str, Any]],
+    cars: list[CarState | dict[str, Any]],
+    greedy_stats: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    spec = GridSpec.from_grid(grid)
+    _ensure_heatmap(demand_heatmap, spec, "demand_heatmap")
+    _ensure_heatmap(traffic_heatmap, spec, "traffic_heatmap")
+
+    occupied_cells: dict[str, int] = {}
+    car_payloads = []
+    for car in cars:
+        position = _car_position(car)
+        if position is None:
+            continue
+        key = f"G_{position[0]}_{position[1]}"
+        occupied_cells[key] = occupied_cells.get(key, 0) + 1
+        car_payloads.append(
+            {
+                "car_id": _car_id(car),
+                "position": [position[0], position[1]],
+                "status": _car_status(car),
+                "greedy_next_cell": list(greedy_next_cell_for_car(car) or position),
+            }
+        )
+
+    return {
+        "timestep": timestep,
+        "grid": {"rows": spec.rows, "cols": spec.cols},
+        "demand": {
+            "mean": round(_mean_heatmap_value(demand_heatmap), 6),
+            "top_cells": _top_cells(demand_heatmap, 8),
+        },
+        "traffic": {
+            "mean": round(_mean_heatmap_value(traffic_heatmap), 6),
+            "bottlenecks": _top_cells(traffic_heatmap, 8),
+        },
+        "active_requests": [_person_to_agent_dict(person) for person in people],
+        "fleet_distribution": {
+            "occupied_cells": occupied_cells,
+            "cars": car_payloads,
+        },
+        "business_metrics": greedy_stats or {},
+    }
+
+
+def build_cnn_training_examples(
+    grid: Any,
+    demand_heatmap: list[list[float]],
+    traffic_heatmap: list[list[float]],
+    people: list[PersonRequest | dict[str, Any]],
+    cars: list[CarState | dict[str, Any]],
+    config: CnnFeatureConfig | None = None,
+    reservations: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    spec = GridSpec.from_grid(grid)
+    config = config or CnnFeatureConfig()
+    feature_payload = build_cnn_feature_channels(
+        spec,
+        demand_heatmap,
+        traffic_heatmap,
+        people,
+        cars,
+        reservations=reservations,
+    )
+    examples = []
+    for car in cars:
+        position = _car_position(car)
+        if position is None or not spec.contains(position):
+            continue
+        candidates = candidate_next_cells(spec, position, include_wait=config.include_wait_action)
+        label_cell = greedy_next_cell_for_car(car) or position
+        matched_label_index = next(
+            (
+                idx
+                for idx, candidate in enumerate(candidates)
+                if tuple(candidate["next_cell"]) == label_cell
+            ),
+            None,
+        )
+        if matched_label_index is None:
+            label_cell = position
+            label_index = 0
+        else:
+            label_index = matched_label_index
+        examples.append(
+            {
+                "car_id": _car_id(car),
+                "car_state": {
+                    "position": [position[0], position[1]],
+                    "status": _car_status(car),
+                },
+                "local_patch": local_patch_from_channels(
+                    feature_payload,
+                    center=position,
+                    radius=config.patch_radius,
+                ),
+                "candidate_moves": candidates,
+                "label": {
+                    "source": "greedy_baseline",
+                    "next_cell": [label_cell[0], label_cell[1]],
+                    "action_index": label_index,
+                    "action": candidates[label_index]["action"] if candidates else "WAIT",
+                },
+            }
+        )
+    return examples
+
+
+def build_mobility_agent_state(
+    grid: Any,
+    timestep: int,
+    demand_heatmap: list[list[float]],
+    traffic_heatmap: list[list[float]],
+    people: list[PersonRequest | dict[str, Any]],
+    dispatch: dict[str, Any],
+    greedy_stats: dict[str, Any] | None = None,
+    config: CnnFeatureConfig | None = None,
+) -> dict[str, Any]:
+    cars = dispatch.get("cars", [])
+    return {
+        "global_state": build_global_state_for_agent(
+            grid,
+            timestep,
+            demand_heatmap,
+            traffic_heatmap,
+            people,
+            cars,
+            greedy_stats=greedy_stats,
+        ),
+        "cnn": {
+            "feature_channels": build_cnn_feature_channels(
+                grid,
+                demand_heatmap,
+                traffic_heatmap,
+                people,
+                cars,
+            ),
+            "training_examples": build_cnn_training_examples(
+                grid,
+                demand_heatmap,
+                traffic_heatmap,
+                people,
+                cars,
+                config=config,
+            ),
+        },
+    }
+
+
 class WorldGenerators:
     def __init__(
         self,
@@ -860,6 +1234,7 @@ class WorldGenerators:
         people_generator: PeopleGenerator | None = None,
         dispatcher: GreedyDispatcher | None = None,
         fleet_size: int = 16,
+        cnn_config: CnnFeatureConfig | None = None,
     ) -> None:
         self.grid = GridSpec.from_grid(grid)
         self.seed = int(seed)
@@ -871,6 +1246,7 @@ class WorldGenerators:
             seed=self.seed + 4,
             fleet_size=fleet_size,
         )
+        self.cnn_config = cnn_config or CnnFeatureConfig()
 
     def step(self, timestep: int) -> dict[str, Any]:
         demand_heatmap = self.demand.get_heatmap(timestep)
@@ -897,6 +1273,16 @@ class WorldGenerators:
             "stalled_cars": dispatch["summary"]["num_stalled_cars"],
             "unassigned_people": dispatch["summary"]["num_unassigned_people"],
         }
+        agent_state = build_mobility_agent_state(
+            self.grid,
+            timestep,
+            demand_heatmap,
+            traffic_heatmap,
+            new_people,
+            dispatch,
+            greedy_stats=greedy_stats,
+            config=self.cnn_config,
+        )
 
         return {
             "timestep": timestep,
@@ -906,11 +1292,13 @@ class WorldGenerators:
             "people_grid": build_people_grid(self.grid, new_people),
             "dispatch": dispatch,
             "greedy_stats": greedy_stats,
+            "agent_state": agent_state,
             "summary": {
                 "num_new_people": len(new_people),
                 "top_demand_cells": self.demand.top_demand_cells(5, timestep),
                 "traffic_bottlenecks": self.traffic.top_bottlenecks(5, timestep, demand_heatmap),
                 "dispatch": dispatch["summary"],
                 "greedy_stats": greedy_stats,
+                "cnn_training_examples": len(agent_state["cnn"]["training_examples"]),
             },
         }

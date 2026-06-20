@@ -53,6 +53,26 @@ python3 export_mobility_world.py --fleet-size 40 --step-minutes 15 --seed 7
 
 The export is intentionally scaled for the demo so route overlays stay readable. The default generated file is large because it includes full Dijkstra route coordinates for playback.
 
+The map export now keeps one stable demand generator, one stable traffic generator, and one stable people generator alive across the simulated day. Demand hotspots evolve with time/noise instead of being re-randomized every snapshot, which makes the data better for comparing greedy dispatch against future AI agents.
+
+## CNN / Agent Data
+
+The backend can also expose MobilitySim-style state for the CNN and LLM orchestrator:
+
+- Global state summary: top demand cells, traffic bottlenecks, active requests, fleet distribution, and greedy business metrics.
+- CNN feature channels: demand, traffic, car occupancy, idle-car occupancy, active pickups, active dropoffs, and reserved targets.
+- Per-car local patches around the car.
+- Candidate next-cell actions: wait, north, east, south, west, clipped to map bounds.
+- Greedy baseline labels so the CNN can start by imitating the current dispatcher.
+
+Export JSONL examples for CNN work:
+
+```bash
+python3 export_cnn_training_data.py --fleet-size 24 --step-minutes 15 --patch-radius 3
+```
+
+Each JSONL row contains one car example with `local_patch`, `candidate_moves`, and a `label` derived from the greedy baseline. This is the handoff point for replacing greedy with CNN proposals and then comparing an AI agent/orchestrator against greedy.
+
 ## Rebuild OSMnx Road Data
 
 Only do this if you need to regenerate the base map/network artifacts.
@@ -79,5 +99,6 @@ The Vite build currently emits a large-chunk warning because the app bundle and 
 - `main.jsx`: React/Deck.gl map UI and overlays.
 - `map.py`: OSMnx network and base data generator.
 - `export_mobility_world.py`: stateful greedy dispatch export for the frontend.
+- `export_cnn_training_data.py`: JSONL export for CNN local-patch training examples.
 - `mobility_sim/generators.py`: demand, traffic, people, and world generator logic.
 - `public/data/`: generated JSON artifacts used by the map.

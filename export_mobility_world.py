@@ -8,7 +8,13 @@ import math
 from pathlib import Path
 import random
 
-from mobility_sim import DemandGenerator, PeopleGenerator, TrafficGenerator, build_people_grid
+from mobility_sim import (
+    DemandGenerator,
+    PeopleGenerator,
+    TrafficGenerator,
+    build_global_state_for_agent,
+    build_people_grid,
+)
 
 
 def load_grid(path: Path) -> dict | tuple[int, int]:
@@ -510,17 +516,17 @@ def main() -> None:
         fleet_size=args.fleet_size,
         candidate_limit=6,
     )
+    demand = DemandGenerator(grid=grid, seed=args.seed + 1)
+    traffic = TrafficGenerator(grid=grid, seed=args.seed + 2)
+    people_generator = PeopleGenerator(
+        grid=grid,
+        seed=args.seed + 3,
+        base_arrival_rate=2.8,
+        max_new_people_per_tick=6,
+    )
     snapshots = []
     step_seconds = max(1, args.step_minutes) * 60
     for timestep in range(0, 24 * 60, max(1, args.step_minutes)):
-        demand = DemandGenerator(grid=grid, seed=args.seed + timestep + 1)
-        traffic = TrafficGenerator(grid=grid, seed=args.seed + timestep + 2)
-        people_generator = PeopleGenerator(
-            grid=grid,
-            seed=args.seed + timestep + 3,
-            base_arrival_rate=2.8,
-            max_new_people_per_tick=6,
-        )
         demand_heatmap = demand.get_heatmap(timestep)
         traffic_heatmap = traffic.get_heatmap(timestep, demand_heatmap)
         people = people_generator.generate(timestep, demand_heatmap, traffic_heatmap)
@@ -545,6 +551,18 @@ def main() -> None:
         snapshot["map_people"] = map_payload["map_people"]
         snapshot["map_dispatch"] = map_payload["map_dispatch"]
         snapshot["map_greedy_stats"] = greedy_stats
+        snapshot["agent_state"] = {
+            "global_state": build_global_state_for_agent(
+                grid,
+                timestep,
+                demand_heatmap,
+                traffic_heatmap,
+                people,
+                map_payload["map_dispatch"]["cars"],
+                greedy_stats=greedy_stats,
+            ),
+            "baseline": "stateful_greedy_map_dispatch",
+        }
         snapshots.append(snapshot)
         dispatcher.advance(step_seconds)
 
@@ -552,6 +570,13 @@ def main() -> None:
         "seed": args.seed,
         "fleet_size": args.fleet_size,
         "step_minutes": args.step_minutes,
+        "generator_config": {
+            "demand_seed": args.seed + 1,
+            "traffic_seed": args.seed + 2,
+            "people_seed": args.seed + 3,
+            "stable_spatial_hotspots": True,
+            "cnn_training_export": "python3 export_cnn_training_data.py",
+        },
         "snapshots": snapshots,
     }
     out_path = Path(args.out)

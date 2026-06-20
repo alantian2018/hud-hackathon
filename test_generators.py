@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from mobility_sim import (
+    CnnFeatureConfig,
     GreedyDispatcher,
     DemandGenerator,
     GridRouter,
@@ -10,6 +11,10 @@ from mobility_sim import (
     PersonRequest,
     TrafficGenerator,
     WorldGenerators,
+    build_cnn_feature_channels,
+    build_cnn_training_examples,
+    build_mobility_agent_state,
+    candidate_next_cells,
 )
 
 
@@ -154,9 +159,96 @@ class GeneratorTests(unittest.TestCase):
 
         self.assertIn("people_grid", payload)
         self.assertIn("dispatch", payload)
+        self.assertIn("agent_state", payload)
         self.assertIn("pickup_grid", payload["people_grid"])
         self.assertIn("dropoff_grid", payload["people_grid"])
         self.assertIn("car_grid", payload["dispatch"])
+        self.assertEqual(
+            payload["summary"]["cnn_training_examples"],
+            len(payload["dispatch"]["cars"]),
+        )
+
+    def test_cnn_feature_channels_have_expected_shape(self) -> None:
+        grid = (6, 6)
+        demand = [[0.2 for _ in range(6)] for _ in range(6)]
+        traffic = [[0.1 for _ in range(6)] for _ in range(6)]
+        people = [
+            PersonRequest(
+                id="person-a",
+                origin=(2, 2),
+                destination=(5, 5),
+                created_at=1,
+                patience=20,
+                value=18.0,
+            )
+        ]
+        dispatcher = GreedyDispatcher(grid, initial_car_positions=[(1, 1)], seed=1)
+        dispatch = dispatcher.step(1, people, traffic)
+
+        features = build_cnn_feature_channels(grid, demand, traffic, people, dispatch["cars"])
+
+        self.assertEqual(features["shape"], [7, 6, 6])
+        self.assertEqual(features["channel_names"][0], "demand")
+        self.assertEqual(features["channels"][4][2][2], 1.0)
+        self.assertEqual(features["channels"][5][5][5], 1.0)
+
+    def test_cnn_training_examples_include_local_patch_and_greedy_label(self) -> None:
+        grid = (8, 8)
+        demand = [[0.4 for _ in range(8)] for _ in range(8)]
+        traffic = [[0.0 for _ in range(8)] for _ in range(8)]
+        people = [
+            PersonRequest(
+                id="person-a",
+                origin=(1, 2),
+                destination=(6, 6),
+                created_at=1,
+                patience=20,
+                value=22.0,
+            )
+        ]
+        dispatcher = GreedyDispatcher(grid, initial_car_positions=[(1, 1)], seed=1)
+        dispatch = dispatcher.step(1, people, traffic)
+
+        examples = build_cnn_training_examples(
+            grid,
+            demand,
+            traffic,
+            people,
+            dispatch["cars"],
+            config=CnnFeatureConfig(patch_radius=2),
+        )
+
+        self.assertEqual(len(examples), 1)
+        example = examples[0]
+        self.assertEqual(example["local_patch"]["shape"], [7, 5, 5])
+        self.assertIn(example["label"]["action"], {"WAIT", "N", "E", "S", "W"})
+        self.assertEqual(
+            tuple(example["candidate_moves"][example["label"]["action_index"]]["next_cell"]),
+            tuple(example["label"]["next_cell"]),
+        )
+
+    def test_candidate_next_cells_respect_grid_bounds(self) -> None:
+        candidates = candidate_next_cells((3, 3), (0, 0))
+        actions = {candidate["action"] for candidate in candidates}
+
+        self.assertEqual(actions, {"WAIT", "E", "S"})
+
+    def test_agent_state_wraps_global_state_and_cnn_examples(self) -> None:
+        payload = WorldGenerators((10, 10), seed=5, fleet_size=3).step(8 * 60)
+        agent_state = build_mobility_agent_state(
+            (10, 10),
+            payload["timestep"],
+            payload["demand_heatmap"],
+            payload["traffic_heatmap"],
+            payload["new_people"],
+            payload["dispatch"],
+            greedy_stats=payload["greedy_stats"],
+        )
+
+        self.assertIn("global_state", agent_state)
+        self.assertIn("cnn", agent_state)
+        self.assertEqual(len(agent_state["cnn"]["training_examples"]), 3)
+        self.assertIn("top_cells", agent_state["global_state"]["demand"])
 
 
 if __name__ == "__main__":
