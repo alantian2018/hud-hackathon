@@ -1255,7 +1255,7 @@ function App() {
         completedTrips: greedy.completed_trips ?? 0,
         revenue: greedy.revenue ?? 0,
         waitTimeMin: snapshotWaitTimeMinutes(mobilitySnapshot),
-        fleetUtilization: greedy.fleet_utilization_pct ?? 0,
+        fleetUtilization: greedy.avg_fleet_utilization_pct ?? greedy.fleet_utilization_pct ?? 0,
         activeCars: greedy.active_cars ?? 0,
         stalledCars: greedy.stalled_cars ?? 0,
         unassignedPeople: greedy.unassigned_people ?? 0,
@@ -1629,9 +1629,9 @@ function App() {
       accent: "#facc15"
     },
     {
-      label: "Fleet Utilization",
+      label: "Avg Fleet Utilization",
       value: `${demoStats.fleetUtilization.toFixed(0)}%`,
-      detail: demoStats.source === "greedy" ? "greedy assigned cars" : "cars earning",
+      detail: demoStats.source === "greedy" ? "mean assigned fleet" : "estimated mean active",
       progress: demoStats.fleetUtilization,
       accent: "#fb7185"
     }

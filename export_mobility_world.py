@@ -271,6 +271,8 @@ class StatefulMapDispatch:
         self.canceled_requests = 0
         self.revenue = 0.0
         self.total_wait_minutes = 0.0
+        self.utilization_pct_total = 0.0
+        self.utilization_samples = 0
 
     def add_requests(self, people: list, timestep: int) -> None:
         for person in people:
@@ -310,6 +312,10 @@ class StatefulMapDispatch:
         matched_requests = self.completed_trips + len(active_people_ids)
         demand_served = matched_requests / max(1, self.total_requests) * 100.0
         wait_time = self.total_wait_minutes + self._queued_customer_wait(timestep)
+        current_utilization = active_cars / max(1, len(self.cars)) * 100.0
+        self.utilization_pct_total += current_utilization
+        self.utilization_samples += 1
+        avg_fleet_utilization = self.utilization_pct_total / max(1, self.utilization_samples)
 
         return {
             "map_people": map_people,
@@ -330,7 +336,8 @@ class StatefulMapDispatch:
                 "revenue": round(self.revenue, 2),
                 "demand_served_pct": round(demand_served, 2),
                 "wait_time_min": round(wait_time, 2),
-                "fleet_utilization_pct": round(active_cars / max(1, len(self.cars)) * 100.0, 2),
+                "fleet_utilization_pct": round(current_utilization, 2),
+                "avg_fleet_utilization_pct": round(avg_fleet_utilization, 2),
                 "active_cars": active_cars,
                 "stalled_cars": stalled_cars,
                 "unassigned_people": len(map_people) - len(active_people_ids),

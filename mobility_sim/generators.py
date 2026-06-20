@@ -898,12 +898,14 @@ class WorldGenerators:
             wait_times.append(queue_wait + pickup_cost)
         wait_time = sum(wait_times)
         fleet_size = max(1, len(dispatch["cars"]))
+        fleet_utilization = dispatch["summary"]["num_active_cars"] / fleet_size * 100.0
         greedy_stats = {
             "completed_trips": len(assigned_people),
             "revenue": round(sum(person.value for person in assigned_people), 2),
             "demand_served_pct": round(served_pct, 2),
             "wait_time_min": round(wait_time, 2),
-            "fleet_utilization_pct": round(dispatch["summary"]["num_active_cars"] / fleet_size * 100.0, 2),
+            "fleet_utilization_pct": round(fleet_utilization, 2),
+            "avg_fleet_utilization_pct": round(fleet_utilization, 2),
             "active_cars": dispatch["summary"]["num_active_cars"],
             "stalled_cars": dispatch["summary"]["num_stalled_cars"],
             "unassigned_people": dispatch["summary"]["num_unassigned_people"],
