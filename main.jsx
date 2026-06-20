@@ -541,6 +541,42 @@ function gridCellPolygonFeature(cell, grid, properties) {
 }
 
 function makeGreedyPeopleFeatureCollection(snapshot, grid) {
+  const mapPeople = snapshot?.map_people ?? [];
+  if (mapPeople.length) {
+    const features = [];
+    for (const person of mapPeople) {
+      if (person.pickup_position) {
+        features.push({
+          type: "Feature",
+          geometry: {type: "Point", coordinates: person.pickup_position},
+          properties: {
+            kind: "pickup",
+            person_id: person.id,
+            node_id: person.pickup_node_id,
+            grid_cell: person.origin,
+            paired_node_id: person.dropoff_node_id,
+            paired_position: person.dropoff_position
+          }
+        });
+      }
+      if (person.dropoff_position) {
+        features.push({
+          type: "Feature",
+          geometry: {type: "Point", coordinates: person.dropoff_position},
+          properties: {
+            kind: "dropoff",
+            person_id: person.id,
+            node_id: person.dropoff_node_id,
+            grid_cell: person.destination,
+            paired_node_id: person.pickup_node_id,
+            paired_position: person.pickup_position
+          }
+        });
+      }
+    }
+    return {type: "FeatureCollection", features};
+  }
+
   const markers = snapshot?.people_grid?.markers ?? [];
   const features = [];
   for (const marker of markers) {
@@ -567,11 +603,13 @@ function routePathToCoordinates(path, grid) {
 }
 
 function makeGreedyRouteFeatureCollection(snapshot, grid) {
-  const assignments = snapshot?.dispatch?.assignments ?? [];
+  const assignments = snapshot?.map_dispatch?.assignments ?? snapshot?.dispatch?.assignments ?? [];
   const features = [];
   for (const assignment of assignments) {
-    const pickupCoords = routePathToCoordinates(assignment.pickup_route?.path, grid);
-    const dropoffCoords = routePathToCoordinates(assignment.dropoff_route?.path, grid);
+    const pickupCoords =
+      assignment.pickup_route?.coordinates ?? routePathToCoordinates(assignment.pickup_route?.path, grid);
+    const dropoffCoords =
+      assignment.dropoff_route?.coordinates ?? routePathToCoordinates(assignment.dropoff_route?.path, grid);
     if (pickupCoords.length >= 2) {
       features.push({
         type: "Feature",
@@ -601,6 +639,16 @@ function makeGreedyRouteFeatureCollection(snapshot, grid) {
 }
 
 function greedyCarPoints(snapshot, grid) {
+  const mapCars = snapshot?.map_dispatch?.cars ?? [];
+  if (mapCars.length) {
+    return mapCars
+      .map(car => {
+        if (!car.position) return null;
+        return {...car, grid_position: null};
+      })
+      .filter(Boolean);
+  }
+
   return (snapshot?.dispatch?.cars ?? [])
     .map(car => {
       const position = gridCellCenter(car.position, grid);
@@ -950,7 +998,7 @@ function App() {
   }, [carPresenceByCell, populationGrid, ppoNodes.length]);
 
   const demoStats = useMemo(() => {
-    const greedy = mobilitySnapshot?.greedy_stats;
+    const greedy = mobilitySnapshot?.map_greedy_stats ?? mobilitySnapshot?.greedy_stats;
     if (greedy) {
       return {
         completedTrips: greedy.completed_trips ?? 0,
@@ -1045,9 +1093,14 @@ function App() {
       data: makeGreedyPeopleFeatureCollection(mobilitySnapshot, populationGrid),
       stroked: true,
       filled: true,
+      pointType: "circle",
       pickable: true,
       autoHighlight: true,
       highlightColor: [255, 255, 255, 85],
+      radiusUnits: "meters",
+      getPointRadius: f => (f.properties?.kind === "pickup" ? 78 : 66),
+      pointRadiusMinPixels: 5,
+      pointRadiusMaxPixels: 15,
       lineWidthMinPixels: 1.5,
       getFillColor: f =>
         f.properties?.kind === "pickup" ? [168, 85, 247, 155] : [249, 115, 22, 150],
@@ -1518,9 +1571,10 @@ function App() {
             const p = object.properties ?? {};
             return {
               text:
-                `${p.kind === "pickup" ? "Pickup" : "Dropoff"} grid [${p.row}, ${p.col}]\n` +
+                `${p.kind === "pickup" ? "Pickup" : "Dropoff"} node ${p.node_id ?? "?"}\n` +
                 `person: ${p.person_id}\n` +
-                `paired cell: [${p.paired_cell?.[0] ?? "?"}, ${p.paired_cell?.[1] ?? "?"}]`
+                `source grid: [${p.grid_cell?.[0] ?? p.row ?? "?"}, ${p.grid_cell?.[1] ?? p.col ?? "?"}]\n` +
+                `paired node: ${p.paired_node_id ?? "?"}`
             };
           }
           if (layer.id === "greedy-dispatch-routes") {
@@ -1538,7 +1592,7 @@ function App() {
               text:
                 `${object.id}\n` +
                 `status: ${object.status}\n` +
-                `grid: [${object.grid_position?.[0] ?? "?"}, ${object.grid_position?.[1] ?? "?"}]\n` +
+                `node: ${object.node_id ?? "?"}\n` +
                 `person: ${object.assigned_person_id ?? "none"}\n` +
                 `stall ticks: ${object.stall_ticks ?? 0}`
             };
