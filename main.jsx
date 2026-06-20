@@ -738,11 +738,56 @@ function interpolatePathPosition(coordinates, progress) {
   return coordinates[coordinates.length - 1];
 }
 
-function snapshotProgress(snapshot, clockMinute, stepMinutes) {
+function routePathFromProgress(coordinates, progress) {
+  if (!Array.isArray(coordinates) || coordinates.length < 2) return coordinates ?? [];
+  const targetProgress = clamp(progress, 0, 1);
+  if (targetProgress >= 1) return [coordinates[coordinates.length - 1]];
+
+  const lengths = [];
+  let totalLength = 0;
+  for (let i = 0; i < coordinates.length - 1; i++) {
+    const a = coordinates[i];
+    const b = coordinates[i + 1];
+    const length = Math.hypot(b[0] - a[0], b[1] - a[1]);
+    lengths.push(length);
+    totalLength += length;
+  }
+  if (totalLength <= 0) return coordinates;
+
+  let distance = totalLength * targetProgress;
+  for (let i = 0; i < lengths.length; i++) {
+    const length = lengths[i];
+    if (distance > length) {
+      distance -= length;
+      continue;
+    }
+    const a = coordinates[i];
+    const b = coordinates[i + 1];
+    const t = length <= 0 ? 0 : distance / length;
+    const current = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    return [current, ...coordinates.slice(i + 1)];
+  }
+
+  return [coordinates[coordinates.length - 1]];
+}
+
+function snapshotElapsedMinutes(snapshot, clockMinute, stepMinutes) {
   if (!snapshot) return 0;
   const start = snapshot.timestep ?? 0;
   const elapsed = (((clockMinute - start) % (24 * 60)) + 24 * 60) % (24 * 60);
-  return clamp(elapsed / Math.max(1, stepMinutes), 0, 1);
+  return clamp(elapsed, 0, Math.max(1, stepMinutes));
+}
+
+function snapshotProgress(snapshot, clockMinute, stepMinutes) {
+  return snapshotElapsedMinutes(snapshot, clockMinute, stepMinutes) / Math.max(1, stepMinutes);
+}
+
+function activeRouteProgress(assignment, car, snapshot, clockMinute, stepMinutes) {
+  const routeCost = Number(assignment?.route?.cost ?? assignment?.total_cost ?? assignment?.dropoff_route?.cost ?? 0);
+  if (!assignment || routeCost <= 0) return snapshotProgress(snapshot, clockMinute, stepMinutes);
+  const snapshotSeconds = snapshotElapsedMinutes(snapshot, clockMinute, stepMinutes) * 60;
+  const routeElapsed = Number(car?.route_elapsed ?? assignment?.route_elapsed ?? 0);
+  return clamp((routeElapsed + snapshotSeconds) / routeCost, 0, 1);
 }
 
 function activeGreedyAssignments(snapshot) {
@@ -753,8 +798,9 @@ function activeGreedyPeople(snapshot) {
   return snapshot?.map_people ?? [];
 }
 
-function makeGreedyRouteFeatureCollection(snapshot, grid, kindFilter = null) {
+function makeGreedyRouteFeatureCollection(snapshot, grid, kindFilter = null, clockMinute = 0, stepMinutes = 15) {
   const assignments = activeGreedyAssignments(snapshot);
+  const carById = new Map((snapshot?.map_dispatch?.cars ?? []).map(car => [car.id, car]));
   const features = [];
   for (const assignment of assignments) {
     const activeCoords =
@@ -762,15 +808,18 @@ function makeGreedyRouteFeatureCollection(snapshot, grid, kindFilter = null) {
       assignment.active_route?.coordinates ??
       assignment.dropoff_route?.coordinates ??
       routePathToCoordinates(assignment.dropoff_route?.path, grid);
-    if ((!kindFilter || kindFilter === "to_dropoff") && activeCoords.length >= 2) {
+    const car = carById.get(assignment.car_id);
+    const progress = activeRouteProgress(assignment, car, snapshot, clockMinute, stepMinutes);
+    const remainingCoords = routePathFromProgress(activeCoords, progress);
+    if ((!kindFilter || kindFilter === "to_dropoff") && remainingCoords.length >= 2) {
       features.push({
         type: "Feature",
-        geometry: {type: "LineString", coordinates: activeCoords},
+        geometry: {type: "LineString", coordinates: remainingCoords},
         properties: {
           kind: "active_route",
           car_id: assignment.car_id,
           person_id: assignment.person_id,
-          cost: assignment.route?.cost ?? assignment.total_cost ?? assignment.dropoff_route?.cost ?? 0
+          cost: (assignment.route?.cost ?? assignment.total_cost ?? assignment.dropoff_route?.cost ?? 0) * (1 - progress)
         }
       });
     }
@@ -781,7 +830,6 @@ function makeGreedyRouteFeatureCollection(snapshot, grid, kindFilter = null) {
 function greedyCarPoints(snapshot, grid, clockMinute = 0, stepMinutes = 15) {
   const mapCars = snapshot?.map_dispatch?.cars ?? [];
   if (mapCars.length) {
-    const progress = snapshotProgress(snapshot, clockMinute, stepMinutes);
     const assignmentByCarId = new Map(
       activeGreedyAssignments(snapshot).map(assignment => [assignment.car_id, assignment])
     );
@@ -794,6 +842,7 @@ function greedyCarPoints(snapshot, grid, clockMinute = 0, stepMinutes = 15) {
           assignment?.active_route?.coordinates ??
           assignment?.dropoff_route?.coordinates ??
           [];
+        const progress = activeRouteProgress(assignment, car, snapshot, clockMinute, stepMinutes);
         const animatedPosition =
           assignment && routeCoords.length >= 2
             ? interpolatePathPosition(routeCoords, progress)
@@ -1346,7 +1395,13 @@ function App() {
     if (!showGreedySim || !mobilitySnapshot || !populationGrid) return null;
     return new GeoJsonLayer({
       id: "greedy-dispatch-route-casing",
-      data: makeGreedyRouteFeatureCollection(mobilitySnapshot, populationGrid, "to_dropoff"),
+      data: makeGreedyRouteFeatureCollection(
+        mobilitySnapshot,
+        populationGrid,
+        "to_dropoff",
+        clockMinute,
+        mobilityStepMinutes
+      ),
       stroked: true,
       filled: false,
       pickable: false,
@@ -1354,13 +1409,19 @@ function App() {
       lineWidthMaxPixels: 18,
       getLineColor: ROUTE_CASING
     });
-  }, [showGreedySim, mobilitySnapshot, populationGrid]);
+  }, [showGreedySim, mobilitySnapshot, populationGrid, clockMinute, mobilityStepMinutes]);
 
   const greedyRouteLayer = useMemo(() => {
     if (!showGreedySim || !mobilitySnapshot || !populationGrid) return null;
     return new GeoJsonLayer({
       id: "greedy-dispatch-routes",
-      data: makeGreedyRouteFeatureCollection(mobilitySnapshot, populationGrid, "to_dropoff"),
+      data: makeGreedyRouteFeatureCollection(
+        mobilitySnapshot,
+        populationGrid,
+        "to_dropoff",
+        clockMinute,
+        mobilityStepMinutes
+      ),
       stroked: true,
       filled: false,
       pickable: true,
@@ -1368,7 +1429,7 @@ function App() {
       lineWidthMaxPixels: 13,
       getLineColor: ROUTE_BLUE
     });
-  }, [showGreedySim, mobilitySnapshot, populationGrid]);
+  }, [showGreedySim, mobilitySnapshot, populationGrid, clockMinute, mobilityStepMinutes]);
 
   const greedyCarLayer = useMemo(() => {
     if (!showGreedySim || !mobilitySnapshot || !populationGrid) return null;

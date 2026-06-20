@@ -286,11 +286,19 @@ class StatefulMapDispatch:
         self._expire_requests(timestep)
         self.add_requests(people, timestep)
         new_assignments = self._assign_waiting(timestep)
-        active_assignments = [
-            car["assignment"]
-            for car in self.cars
-            if car.get("assignment") is not None
-        ]
+        active_assignments = []
+        for car in self.cars:
+            assignment = car.get("assignment")
+            if assignment is None:
+                continue
+            active_assignments.append(
+                {
+                    **assignment,
+                    "current_position": car["position"],
+                    "current_grid_cell": car.get("grid_cell"),
+                    "route_elapsed": round(float(car.get("route_elapsed", 0.0)), 6),
+                }
+            )
         active_people_ids = {assignment["person_id"] for assignment in active_assignments}
         map_people = [
             {**item["payload"], "status": "assigned" if item["payload"]["id"] in active_people_ids else "waiting"}
@@ -473,6 +481,7 @@ class StatefulMapDispatch:
             "pickup_node_id": car.get("pickup_node_id"),
             "dropoff_node_id": car.get("dropoff_node_id"),
             "stall_ticks": car["stall_ticks"],
+            "route_elapsed": round(float(car.get("route_elapsed", 0.0)), 6),
         }
 
 
