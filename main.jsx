@@ -893,6 +893,23 @@ function formatCurrency(value) {
   return `$${Math.round(value).toLocaleString()}`;
 }
 
+function formatMinutes(value) {
+  const minutes = Number.isFinite(value) ? Math.max(0, value) : 0;
+  return minutes >= 100 ? `${Math.round(minutes).toLocaleString()} min` : `${minutes.toFixed(1)} min`;
+}
+
+function snapshotWaitTimeMinutes(snapshot) {
+  const greedy = snapshot?.map_greedy_stats ?? snapshot?.greedy_stats;
+  if (Number.isFinite(greedy?.wait_time_min)) return greedy.wait_time_min;
+
+  const assignmentTotal = activeGreedyAssignments(snapshot).reduce(
+    (sum, assignment) => sum + (Number(assignment.wait_time_min) || 0),
+    0
+  );
+  if (assignmentTotal > 0) return assignmentTotal;
+  return 0;
+}
+
 function App() {
   const [clockMinute, setClockMinute] = useState(7 * 60);
   const [simSpeed, setSimSpeed] = useState(1);
@@ -965,7 +982,9 @@ function App() {
     async function loadMobilityWorld() {
       try {
         setMobilityWorldStatus("loading");
-        const res = await fetch("/data/mobility_world.json");
+        const res = await fetch(`/data/mobility_world.json?v=${Date.now()}`, {
+          cache: "no-store"
+        });
         if (!res.ok) {
           throw new Error(`mobility_world.json ${res.status}`);
         }
@@ -1235,7 +1254,7 @@ function App() {
       return {
         completedTrips: greedy.completed_trips ?? 0,
         revenue: greedy.revenue ?? 0,
-        avgWaitMin: greedy.avg_wait_time_min ?? 0,
+        waitTimeMin: snapshotWaitTimeMinutes(mobilitySnapshot),
         fleetUtilization: greedy.fleet_utilization_pct ?? 0,
         activeCars: greedy.active_cars ?? 0,
         stalledCars: greedy.stalled_cars ?? 0,
@@ -1253,11 +1272,12 @@ function App() {
     );
     const averageFare = 18.5 + 3.2 * clamp(currentHourCongestion.mean - 1, 0, 2);
     const revenue = completedTrips * averageFare;
-    const avgWaitMin = clamp(
+    const estimatedWaitPerTrip = clamp(
       2.5 + congestionPenalty * 18 + currentHourCongestion.hotShare * 8 + (1 - activeShare) * 2,
       2,
       24
     );
+    const waitTimeMin = completedTrips * estimatedWaitPerTrip;
     const fleetUtilization = clamp(
       52 + activeShare * 31 + (1 - flowFactor) * 16 + timeTrafficPressureFactor(currentHourFloat) * 3,
       48,
@@ -1267,7 +1287,7 @@ function App() {
     return {
       completedTrips,
       revenue,
-      avgWaitMin,
+      waitTimeMin,
       fleetUtilization,
       activeCars: uberCars.length,
       stalledCars: 0,
@@ -1599,13 +1619,13 @@ function App() {
       accent: "#7dd3fc"
     },
     {
-      label: "Avg Wait Time",
-      value: `${demoStats.avgWaitMin.toFixed(1)} min`,
+      label: "Wait Time",
+      value: formatMinutes(demoStats.waitTimeMin),
       detail:
         demoStats.source === "greedy"
-          ? "live request to pickup"
-          : "estimated customer wait",
-      progress: clamp((demoStats.avgWaitMin / 20) * 100, 0, 100),
+          ? "total customer minutes"
+          : "estimated customer minutes",
+      progress: clamp((demoStats.waitTimeMin / 1800) * 100, 0, 100),
       accent: "#facc15"
     },
     {

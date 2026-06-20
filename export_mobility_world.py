@@ -270,7 +270,7 @@ class StatefulMapDispatch:
         self.completed_trips = 0
         self.canceled_requests = 0
         self.revenue = 0.0
-        self.recent_wait_minutes: list[float] = []
+        self.total_wait_minutes = 0.0
 
     def add_requests(self, people: list, timestep: int) -> None:
         for person in people:
@@ -309,7 +309,7 @@ class StatefulMapDispatch:
         stalled_cars = len(self.cars) - active_cars
         matched_requests = self.completed_trips + len(active_people_ids)
         demand_served = matched_requests / max(1, self.total_requests) * 100.0
-        avg_wait_time = self._average_customer_wait(timestep)
+        wait_time = self.total_wait_minutes + self._queued_customer_wait(timestep)
 
         return {
             "map_people": map_people,
@@ -329,7 +329,7 @@ class StatefulMapDispatch:
                 "completed_trips": self.completed_trips,
                 "revenue": round(self.revenue, 2),
                 "demand_served_pct": round(demand_served, 2),
-                "avg_wait_time_min": round(avg_wait_time, 2),
+                "wait_time_min": round(wait_time, 2),
                 "fleet_utilization_pct": round(active_cars / max(1, len(self.cars)) * 100.0, 2),
                 "active_cars": active_cars,
                 "stalled_cars": stalled_cars,
@@ -454,64 +454,47 @@ class StatefulMapDispatch:
                     "route_elapsed": 0.0,
                 }
             )
-            self.recent_wait_minutes.append(wait_minutes)
-            self.recent_wait_minutes = self.recent_wait_minutes[-50:]
+            self.total_wait_minutes += wait_minutes
             assignments.append(assignment)
 
         return assignments
 
-    def _average_customer_wait(self, timestep: int) -> float:
+    def _queued_customer_wait(self, timestep: int) -> float:
         hour = (timestep // 60) % 24
-        samples = []
-
-        for car in self.cars:
-            assignment = car.get("assignment")
-            if assignment is None:
-                continue
-            pickup_cost = float(assignment["pickup_route"]["cost"])
-            route_elapsed = float(car.get("route_elapsed", 0.0))
-            if route_elapsed < pickup_cost:
-                request_age = max(0.0, float(timestep - int(assignment.get("request_created_at", timestep))))
-                remaining_pickup = max(0.0, pickup_cost - route_elapsed) / 60.0
-                samples.append(request_age + remaining_pickup)
-
         waiting = [item for item in self.pending if item["payload"].get("status") != "assigned"]
-        if waiting:
-            car_eta_cache: dict[tuple[str, int], float] = {}
-            for item in waiting:
-                payload = item["payload"]
-                pickup_node_id = int(payload["pickup_node_id"])
-                request_age = max(0.0, float(timestep - int(item["created_at"])))
-                best_eta = None
-                for car in self.cars:
-                    cache_key = (car["id"], pickup_node_id)
-                    if cache_key in car_eta_cache:
-                        eta = car_eta_cache[cache_key]
-                    else:
-                        assignment = car.get("assignment")
-                        if assignment is None:
-                            eta = float(self.graph.route(int(car["node_id"]), pickup_node_id, hour)["cost"]) / 60.0
-                        else:
-                            route = assignment["route"]
-                            remaining_current = max(
-                                0.0,
-                                float(route["cost"]) - float(car.get("route_elapsed", 0.0)),
-                            ) / 60.0
-                            reposition = float(
-                                self.graph.route(int(assignment["dropoff_node_id"]), pickup_node_id, hour)["cost"]
-                            ) / 60.0
-                            eta = remaining_current + reposition
-                        car_eta_cache[cache_key] = eta
-                    if best_eta is None or eta < best_eta:
-                        best_eta = eta
-                samples.append(request_age + (best_eta if best_eta is not None else 15.0))
+        if not waiting:
+            return 0.0
 
-        if samples:
-            return sum(samples) / len(samples)
-        if self.recent_wait_minutes:
-            recent = self.recent_wait_minutes[-20:]
-            return sum(recent) / len(recent)
-        return 0.0
+        total_wait = 0.0
+        car_eta_cache: dict[tuple[str, int], float] = {}
+        for item in waiting:
+            payload = item["payload"]
+            pickup_node_id = int(payload["pickup_node_id"])
+            request_age = max(0.0, float(timestep - int(item["created_at"])))
+            best_eta = None
+            for car in self.cars:
+                cache_key = (car["id"], pickup_node_id)
+                if cache_key in car_eta_cache:
+                    eta = car_eta_cache[cache_key]
+                else:
+                    assignment = car.get("assignment")
+                    if assignment is None:
+                        eta = float(self.graph.route(int(car["node_id"]), pickup_node_id, hour)["cost"]) / 60.0
+                    else:
+                        route = assignment["route"]
+                        remaining_current = max(
+                            0.0,
+                            float(route["cost"]) - float(car.get("route_elapsed", 0.0)),
+                        ) / 60.0
+                        reposition = float(
+                            self.graph.route(int(assignment["dropoff_node_id"]), pickup_node_id, hour)["cost"]
+                        ) / 60.0
+                        eta = remaining_current + reposition
+                    car_eta_cache[cache_key] = eta
+                if best_eta is None or eta < best_eta:
+                    best_eta = eta
+            total_wait += request_age + (best_eta if best_eta is not None else 15.0)
+        return total_wait
 
     def _complete_trip(self, car: dict) -> None:
         assignment = car["assignment"]
