@@ -91,6 +91,17 @@ class GeneratorTests(unittest.TestCase):
         high_demand_origins = sum(1 for person in people if person.origin == (0, 0))
         self.assertGreaterEqual(high_demand_origins, max(1, int(len(people) * 0.75)))
 
+    def test_people_arrivals_increase_with_traffic_pressure(self) -> None:
+        demand = [[1.0 for _ in range(8)] for _ in range(8)]
+        low_traffic = [[0.0 for _ in range(8)] for _ in range(8)]
+        high_traffic = [[1.0 for _ in range(8)] for _ in range(8)]
+        generator = PeopleGenerator((8, 8), seed=11, base_arrival_rate=8, max_new_people_per_tick=20)
+
+        low = generator.generate(44, demand, low_traffic)
+        high = generator.generate(44, demand, high_traffic)
+
+        self.assertGreater(len(high), len(low))
+
     def test_traffic_modulation_and_noise_are_clipped(self) -> None:
         generator = TrafficGenerator((8, 8), seed=5, noise_level=0.2, demand_coupling=0.35)
         demand = [[1.0 if row == col else 0.2 for col in range(8)] for row in range(8)]

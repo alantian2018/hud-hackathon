@@ -8,7 +8,7 @@ import math
 from pathlib import Path
 import random
 
-from mobility_sim import DemandGenerator, PeopleGenerator, TrafficGenerator, WorldGenerators
+from mobility_sim import DemandGenerator, PeopleGenerator, TrafficGenerator, build_people_grid
 
 
 def load_grid(path: Path) -> dict | tuple[int, int]:
@@ -90,7 +90,7 @@ class MapGraph:
         goal_node = int(goal_node)
         if start_node == goal_node:
             point = self.node_position(start_node)
-            return {"node_path": [start_node], "coordinates": [point], "cost": 0.0}
+            return {"node_path": [start_node], "coordinates": [point], "cost": 0.0, "fallback": False}
 
         frontier = [(0.0, start_node)]
         best = {start_node: 0.0}
@@ -112,11 +112,7 @@ class MapGraph:
                     heapq.heappush(frontier, (next_cost, to_node))
 
         if goal_node not in best:
-            return {
-                "node_path": [start_node, goal_node],
-                "coordinates": [self.node_position(start_node), self.node_position(goal_node)],
-                "cost": math.inf,
-            }
+            return self._direct_fallback_route(start_node, goal_node)
 
         node_path = [goal_node]
         edge_path = []
@@ -138,6 +134,22 @@ class MapGraph:
             "node_path": node_path,
             "coordinates": coordinates,
             "cost": round(best[goal_node], 6),
+            "fallback": False,
+        }
+
+    def _direct_fallback_route(self, start_node: int, goal_node: int) -> dict:
+        start = self.node_position(start_node)
+        goal = self.node_position(goal_node)
+        mean_lat = math.radians((start[1] + goal[1]) / 2)
+        dx = (goal[0] - start[0]) * math.cos(mean_lat) * 111_320
+        dy = (goal[1] - start[1]) * 111_320
+        distance_m = math.hypot(dx, dy)
+        # Keep browser JSON valid even when OSMnx graph components are disconnected.
+        return {
+            "node_path": [start_node, goal_node],
+            "coordinates": [start, goal],
+            "cost": round(distance_m / 7.0 + 45.0, 6),
+            "fallback": True,
         }
 
 
@@ -157,6 +169,10 @@ def build_map_dispatch(graph: MapGraph, people: list, timestep: int, seed: int, 
             "id": f"car-{idx}",
             "node_id": node_id,
             "position": graph.node_position(node_id),
+            "grid_cell": [
+                int(graph.nodes[node_id]["grid_row"]),
+                int(graph.nodes[node_id]["grid_col"]),
+            ],
             "status": "idle",
             "assigned_person_id": None,
             "stall_ticks": 1,
@@ -179,6 +195,10 @@ def build_map_dispatch(graph: MapGraph, people: list, timestep: int, seed: int, 
                 "dropoff_node_id": int(dropoff_node["node_id"]),
                 "pickup_position": [float(pickup_node["lon"]), float(pickup_node["lat"])],
                 "dropoff_position": [float(dropoff_node["lon"]), float(dropoff_node["lat"])],
+                "pickup_grid_cell": [int(pickup_node["grid_row"]), int(pickup_node["grid_col"])],
+                "dropoff_grid_cell": [int(dropoff_node["grid_row"]), int(dropoff_node["grid_col"])],
+                "request_origin": list(person.origin),
+                "request_destination": list(person.destination),
             }
         )
         map_people.append(person_payload)
@@ -259,7 +279,7 @@ def main() -> None:
     parser.add_argument("--out", default="public/data/mobility_world.json")
     parser.add_argument("--seed", default=7, type=int)
     parser.add_argument("--fleet-size", default=16, type=int)
-    parser.add_argument("--step-minutes", default=60, type=int)
+    parser.add_argument("--step-minutes", default=15, type=int)
     args = parser.parse_args()
 
     grid = load_grid(Path(args.grid))
@@ -269,22 +289,56 @@ def main() -> None:
         load_json(Path(args.edges_geojson)),
     )
     snapshots = []
+    cumulative_completed = 0
+    cumulative_revenue = 0.0
+    cumulative_requests = 0
+    cumulative_served = 0
     for timestep in range(0, 24 * 60, max(1, args.step_minutes)):
         demand = DemandGenerator(grid=grid, seed=args.seed + timestep + 1)
         traffic = TrafficGenerator(grid=grid, seed=args.seed + timestep + 2)
-        people_generator = PeopleGenerator(grid=grid, seed=args.seed + timestep + 3)
+        people_generator = PeopleGenerator(
+            grid=grid,
+            seed=args.seed + timestep + 3,
+            base_arrival_rate=2.8,
+            max_new_people_per_tick=7,
+        )
         demand_heatmap = demand.get_heatmap(timestep)
         traffic_heatmap = traffic.get_heatmap(timestep, demand_heatmap)
         people = people_generator.generate(timestep, demand_heatmap, traffic_heatmap)
-        world = WorldGenerators(grid=grid, seed=args.seed + timestep, fleet_size=args.fleet_size)
-        snapshot = world.step(timestep)
         map_payload = build_map_dispatch(graph, people, timestep, args.seed, args.fleet_size)
-        snapshot["new_people"] = [person.to_dict() for person in people]
+        tick_stats = map_payload["map_greedy_stats"]
+        cumulative_completed += int(tick_stats["completed_trips"])
+        cumulative_revenue += float(tick_stats["revenue"])
+        cumulative_requests += len(people)
+        cumulative_served += int(tick_stats["completed_trips"])
+        greedy_stats = {
+            **tick_stats,
+            "completed_trips": cumulative_completed,
+            "revenue": round(cumulative_revenue, 2),
+            "demand_served_pct": round(
+                cumulative_served / max(1, cumulative_requests) * 100.0,
+                2,
+            ),
+        }
+        snapshot = {
+            "timestep": timestep,
+            "demand_heatmap": demand_heatmap,
+            "traffic_heatmap": traffic_heatmap,
+            "new_people": [person.to_dict() for person in people],
+            "people_grid": build_people_grid(grid, people),
+            "dispatch": map_payload["map_dispatch"],
+            "greedy_stats": greedy_stats,
+            "summary": {
+                "num_new_people": len(people),
+                "top_demand_cells": demand.top_demand_cells(5, timestep),
+                "traffic_bottlenecks": traffic.top_bottlenecks(5, timestep, demand_heatmap),
+                "dispatch": map_payload["map_dispatch"]["summary"],
+                "greedy_stats": greedy_stats,
+            },
+        }
         snapshot["map_people"] = map_payload["map_people"]
         snapshot["map_dispatch"] = map_payload["map_dispatch"]
-        snapshot["map_greedy_stats"] = map_payload["map_greedy_stats"]
-        snapshot["greedy_stats"] = map_payload["map_greedy_stats"]
-        snapshot["summary"]["greedy_stats"] = map_payload["map_greedy_stats"]
+        snapshot["map_greedy_stats"] = greedy_stats
         snapshots.append(snapshot)
 
     payload = {
@@ -295,7 +349,7 @@ def main() -> None:
     }
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(json.dumps(payload, separators=(",", ":")), encoding="utf-8")
+    out_path.write_text(json.dumps(payload, separators=(",", ":"), allow_nan=False), encoding="utf-8")
     print(f"Wrote {len(snapshots)} greedy mobility snapshots to {out_path}")
 
 

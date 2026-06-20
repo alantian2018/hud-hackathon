@@ -463,7 +463,15 @@ class PeopleGenerator:
         flat_demand = [float(v) for row in demand_heatmap for v in row]
         mean_demand = sum(flat_demand) / max(1, len(flat_demand))
         max_demand = max(flat_demand, default=0.0)
-        lam = self.base_arrival_rate * (0.25 + 0.50 * mean_demand + 0.95 * max_demand)
+        traffic_multiplier = 1.0
+        if traffic_heatmap is not None:
+            flat_traffic = [float(v) for row in traffic_heatmap for v in row]
+            mean_traffic = sum(flat_traffic) / max(1, len(flat_traffic))
+            max_traffic = max(flat_traffic, default=0.0)
+            traffic_multiplier += 0.75 * mean_traffic + 0.55 * max_traffic
+        lam = self.base_arrival_rate * (
+            0.25 + 0.50 * mean_demand + 0.95 * max_demand
+        ) * traffic_multiplier
         rng = _rng_for(self.seed, timestep, 29)
         poisson_seed = (self.seed * 1_000_003 + timestep * 65_537 + 29) & ((1 << 63) - 1)
         count = min(self.max_new_people_per_tick, _poisson(lam, rng, poisson_seed))
