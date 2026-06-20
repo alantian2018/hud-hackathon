@@ -1235,7 +1235,7 @@ function App() {
       return {
         completedTrips: greedy.completed_trips ?? 0,
         revenue: greedy.revenue ?? 0,
-        demandServed: greedy.demand_served_pct ?? 0,
+        avgWaitMin: greedy.avg_wait_time_min ?? 0,
         fleetUtilization: greedy.fleet_utilization_pct ?? 0,
         activeCars: greedy.active_cars ?? 0,
         stalledCars: greedy.stalled_cars ?? 0,
@@ -1253,10 +1253,10 @@ function App() {
     );
     const averageFare = 18.5 + 3.2 * clamp(currentHourCongestion.mean - 1, 0, 2);
     const revenue = completedTrips * averageFare;
-    const demandServed = clamp(
-      93 - congestionPenalty * 34 + activeShare * 5 - currentHourCongestion.hotShare * 18,
-      68,
-      98
+    const avgWaitMin = clamp(
+      2.5 + congestionPenalty * 18 + currentHourCongestion.hotShare * 8 + (1 - activeShare) * 2,
+      2,
+      24
     );
     const fleetUtilization = clamp(
       52 + activeShare * 31 + (1 - flowFactor) * 16 + timeTrafficPressureFactor(currentHourFloat) * 3,
@@ -1267,7 +1267,7 @@ function App() {
     return {
       completedTrips,
       revenue,
-      demandServed,
+      avgWaitMin,
       fleetUtilization,
       activeCars: uberCars.length,
       stalledCars: 0,
@@ -1599,13 +1599,13 @@ function App() {
       accent: "#7dd3fc"
     },
     {
-      label: "Demand Served",
-      value: `${demoStats.demandServed.toFixed(0)}%`,
+      label: "Avg Wait Time",
+      value: `${demoStats.avgWaitMin.toFixed(1)} min`,
       detail:
         demoStats.source === "greedy"
-          ? `${demoStats.unassignedPeople} unassigned requests`
-          : "requests matched",
-      progress: demoStats.demandServed,
+          ? "live request to pickup"
+          : "estimated customer wait",
+      progress: clamp((demoStats.avgWaitMin / 20) * 100, 0, 100),
       accent: "#facc15"
     },
     {
