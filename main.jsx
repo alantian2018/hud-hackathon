@@ -385,6 +385,114 @@ function makeGridFeatureCollection(grid) {
   return {type: "FeatureCollection", features};
 }
 
+function gridKey(row, col) {
+  return `${row}:${col}`;
+}
+
+function gridCellForPosition(position, grid) {
+  if (!position || !grid) return null;
+  const {
+    rows,
+    cols,
+    bounds: {min_lon: minLon, max_lon: maxLon, min_lat: minLat, max_lat: maxLat}
+  } = grid;
+  const [lon, lat] = position;
+  if (lon < minLon || lon > maxLon || lat < minLat || lat > maxLat) return null;
+
+  const col = clamp(Math.floor(((lon - minLon) / (maxLon - minLon)) * cols), 0, cols - 1);
+  const row = clamp(Math.floor(((lat - minLat) / (maxLat - minLat)) * rows), 0, rows - 1);
+  return {row, col, key: gridKey(row, col)};
+}
+
+function nearestNodeForPosition(position, nodes) {
+  if (!position || !nodes.length) return null;
+  const [lon, lat] = position;
+  const lonScale = Math.cos((lat * Math.PI) / 180);
+  let bestNode = null;
+  let bestDist = Infinity;
+
+  for (const node of nodes) {
+    const dx = ((node.lon ?? lon) - lon) * lonScale;
+    const dy = (node.lat ?? lat) - lat;
+    const dist = dx * dx + dy * dy;
+    if (dist < bestDist) {
+      bestDist = dist;
+      bestNode = node;
+    }
+  }
+
+  return bestNode;
+}
+
+function makeNodeCountsByGridCell(nodes, grid) {
+  const counts = new Map();
+  for (const node of nodes) {
+    const row = Number.isFinite(node.grid_row) ? node.grid_row : null;
+    const col = Number.isFinite(node.grid_col) ? node.grid_col : null;
+    const cell =
+      row !== null && col !== null
+        ? {row, col, key: gridKey(row, col)}
+        : gridCellForPosition([node.lon, node.lat], grid);
+    if (!cell) continue;
+    counts.set(cell.key, (counts.get(cell.key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function makeCarPresenceByGridCell(cars, nodes, grid) {
+  const presence = new Map();
+
+  for (const car of cars) {
+    const snappedNode = nearestNodeForPosition(car.position, nodes);
+    const cell = snappedNode
+      ? {
+          row: snappedNode.grid_row,
+          col: snappedNode.grid_col,
+          key: gridKey(snappedNode.grid_row, snappedNode.grid_col)
+        }
+      : gridCellForPosition(car.position, grid);
+    if (!cell || cell.row === undefined || cell.col === undefined) continue;
+
+    const existing = presence.get(cell.key) ?? {
+      row: cell.row,
+      col: cell.col,
+      carIds: [],
+      nodeIds: []
+    };
+    existing.carIds.push(car.id);
+    if (snappedNode?.node_id !== undefined) existing.nodeIds.push(snappedNode.node_id);
+    presence.set(cell.key, existing);
+  }
+
+  return presence;
+}
+
+function makeCarPresenceGridFeatureCollection(grid, carPresenceByCell, nodeCountsByCell) {
+  const collection = makeGridFeatureCollection(grid);
+  if (!collection) return null;
+
+  return {
+    ...collection,
+    features: collection.features.map(feature => {
+      const row = feature.properties.row;
+      const col = feature.properties.col;
+      const key = gridKey(row, col);
+      const presence = carPresenceByCell.get(key);
+      return {
+        ...feature,
+        properties: {
+          ...feature.properties,
+          has_car: Boolean(presence),
+          car_count: presence?.carIds.length ?? 0,
+          car_ids: presence?.carIds ?? [],
+          snapped_node_ids: presence?.nodeIds ?? [],
+          intersection_count: nodeCountsByCell.get(key) ?? 0
+        }
+      };
+    })
+  };
+}
+
 function tripPositionAtTime(trip, clockMinute) {
   const path = trip?.path ?? [];
   const timestamps = trip?.timestamps ?? [];
@@ -408,6 +516,10 @@ function tripPositionAtTime(trip, clockMinute) {
   return path[path.length - 1];
 }
 
+function formatCurrency(value) {
+  return `$${Math.round(value).toLocaleString()}`;
+}
+
 function App() {
   const [clockMinute, setClockMinute] = useState(7 * 60);
   const [simSpeed, setSimSpeed] = useState(1);
@@ -419,6 +531,8 @@ function App() {
   const [trips, setTrips] = useState(FALLBACK_TRIPS);
   const [datasetReady, setDatasetReady] = useState(false);
   const [showNodeDensity, setShowNodeDensity] = useState(false);
+  const [showCarGrid, setShowCarGrid] = useState(false);
+  const [telemetryCollapsed, setTelemetryCollapsed] = useState(false);
 
   // Simulated clock in minutes across a day.
   useEffect(() => {
@@ -476,9 +590,9 @@ function App() {
   const flowFactor = trafficFlowSpeedFactor(currentHourFloat);
   const tripClockMinute = clockMinute * flowFactor;
 
-  const gridGeoJson = useMemo(
-    () => makeGridFeatureCollection(populationGrid),
-    [populationGrid]
+  const nodeCountsByCell = useMemo(
+    () => makeNodeCountsByGridCell(ppoNodes, populationGrid),
+    [ppoNodes, populationGrid]
   );
 
   const densityStats = useMemo(() => {
@@ -662,6 +776,94 @@ function App() {
     [trips, tripClockMinute]
   );
 
+  const carPresenceByCell = useMemo(
+    () => makeCarPresenceByGridCell(uberCars, ppoNodes, populationGrid),
+    [uberCars, ppoNodes, populationGrid]
+  );
+
+  const carGridStats = useMemo(() => {
+    let carsInGrid = 0;
+    for (const cell of carPresenceByCell.values()) {
+      carsInGrid += cell.carIds.length;
+    }
+    return {
+      carsInGrid,
+      occupiedCells: carPresenceByCell.size,
+      totalCells: (populationGrid?.rows ?? 0) * (populationGrid?.cols ?? 0),
+      snapMode: ppoNodes.length ? "nearest intersection" : "grid position"
+    };
+  }, [carPresenceByCell, populationGrid, ppoNodes.length]);
+
+  const demoStats = useMemo(() => {
+    const fleetSize = Math.max(uberCars.length, trips.length, 1);
+    const dayProgress = clockMinute / (24 * 60);
+    const congestionPenalty = clamp((currentHourCongestion.mean - 1.2) / 3, 0, 0.32);
+    const activeShare = clamp(carGridStats.carsInGrid / fleetSize, 0, 1);
+    const completedTrips = Math.round(
+      fleetSize * (18 + dayProgress * 74) * (0.88 + flowFactor * 0.16)
+    );
+    const averageFare = 18.5 + 3.2 * clamp(currentHourCongestion.mean - 1, 0, 2);
+    const revenue = completedTrips * averageFare;
+    const demandServed = clamp(
+      93 - congestionPenalty * 34 + activeShare * 5 - currentHourCongestion.hotShare * 18,
+      68,
+      98
+    );
+    const fleetUtilization = clamp(
+      52 + activeShare * 31 + (1 - flowFactor) * 16 + timeTrafficPressureFactor(currentHourFloat) * 3,
+      48,
+      96
+    );
+
+    return {
+      completedTrips,
+      revenue,
+      demandServed,
+      fleetUtilization
+    };
+  }, [
+    carGridStats.carsInGrid,
+    clockMinute,
+    currentHourCongestion,
+    currentHourFloat,
+    flowFactor,
+    trips.length,
+    uberCars.length
+  ]);
+
+  const carPresenceGridGeoJson = useMemo(
+    () =>
+      showCarGrid
+        ? makeCarPresenceGridFeatureCollection(
+            populationGrid,
+            carPresenceByCell,
+            nodeCountsByCell
+          )
+        : null,
+    [showCarGrid, populationGrid, carPresenceByCell, nodeCountsByCell]
+  );
+
+  const carPresenceGridLayer = useMemo(() => {
+    if (!showCarGrid || !carPresenceGridGeoJson) return null;
+
+    return new GeoJsonLayer({
+      id: "car-presence-grid",
+      data: carPresenceGridGeoJson,
+      stroked: true,
+      filled: true,
+      pickable: true,
+      autoHighlight: true,
+      highlightColor: [255, 255, 255, 80],
+      lineWidthMinPixels: 0.35,
+      lineWidthMaxPixels: 2.5,
+      getLineWidth: f => (f.properties?.has_car ? 2 : 0.6),
+      getFillColor: f =>
+        f.properties?.has_car ? [0, 210, 165, 105] : [16, 31, 48, 18],
+      getLineColor: f =>
+        f.properties?.has_car ? [0, 255, 190, 235] : [130, 170, 205, 55]
+    });
+  }, [showCarGrid, carPresenceGridGeoJson]);
+
   const uberLayer = useMemo(
     () =>
       new IconLayer({
@@ -682,6 +884,7 @@ function App() {
   );
 
   const layers = [
+    carPresenceGridLayer,
     edgeLayer,
     commuteWaveLayer,
     nodeDensityLayer,
@@ -711,54 +914,123 @@ function App() {
     uberLayer
   ].filter(Boolean);
 
+  const controlButtonStyle = {
+    padding: "8px 12px",
+    background: "black",
+    color: "white",
+    border: "1px solid #333"
+  };
+  const telemetryPanelStyle = {
+    position: "absolute",
+    zIndex: 10,
+    margin: 12,
+    marginTop: 112,
+    width: 390,
+    maxWidth: "calc(100vw - 24px)",
+    overflow: "hidden",
+    background: "rgba(5,10,16,0.84)",
+    color: "white",
+    border: "1px solid rgba(120,150,180,0.38)",
+    borderRadius: 8,
+    boxShadow: "0 18px 50px rgba(0,0,0,0.38)",
+    backdropFilter: "blur(10px)",
+    fontFamily: "sans-serif",
+    fontSize: 13,
+    pointerEvents: "auto"
+  };
+  const demoStatsPanelStyle = {
+    position: "absolute",
+    zIndex: 10,
+    top: keyMissing ? 148 : 12,
+    right: 12,
+    width: 360,
+    maxWidth: "calc(100vw - 24px)",
+    padding: 14,
+    background: "rgba(4,8,14,0.84)",
+    color: "white",
+    border: "1px solid rgba(0,210,165,0.34)",
+    borderRadius: 8,
+    boxShadow: "0 18px 50px rgba(0,0,0,0.4)",
+    backdropFilter: "blur(12px)",
+    fontFamily: "sans-serif",
+    pointerEvents: "auto"
+  };
+  const demoStatItems = [
+    {
+      label: "Completed Trips",
+      value: demoStats.completedTrips.toLocaleString(),
+      detail: `${uberCars.length} active vehicles`,
+      accent: "#00d2a5"
+    },
+    {
+      label: "Revenue",
+      value: formatCurrency(demoStats.revenue),
+      detail: `avg fare ${formatCurrency(demoStats.revenue / Math.max(1, demoStats.completedTrips))}`,
+      accent: "#7dd3fc"
+    },
+    {
+      label: "Demand Served",
+      value: `${demoStats.demandServed.toFixed(0)}%`,
+      detail: "requests matched",
+      progress: demoStats.demandServed,
+      accent: "#facc15"
+    },
+    {
+      label: "Fleet Utilization",
+      value: `${demoStats.fleetUtilization.toFixed(0)}%`,
+      detail: "cars earning",
+      progress: demoStats.fleetUtilization,
+      accent: "#fb7185"
+    }
+  ];
+
   return (
     <>
-      <button
-        onClick={() => setShowNodeDensity(v => !v)}
+      <div
         style={{
           position: "absolute",
           zIndex: 10,
-          margin: 12,
-          padding: "8px 12px",
-          background: "black",
-          color: "white",
-          border: "1px solid #333"
+          top: 12,
+          left: 12,
+          display: "flex",
+          flexWrap: "wrap",
+          gap: 8,
+          maxWidth: "calc(100vw - 24px)",
+          pointerEvents: "auto"
         }}
       >
-        Nodes: {showNodeDensity ? "ON" : "OFF"}
-      </button>
+        <button
+          type="button"
+          onClick={() => setShowNodeDensity(v => !v)}
+          style={controlButtonStyle}
+        >
+          Nodes: {showNodeDensity ? "ON" : "OFF"}
+        </button>
 
-      <button
-        onClick={() => setSimSpeed(s => nextSimSpeed(s))}
-        style={{
-          position: "absolute",
-          zIndex: 10,
-          margin: 12,
-          marginLeft: 116,
-          padding: "8px 12px",
-          background: "black",
-          color: "white",
-          border: "1px solid #333"
-        }}
-      >
-        Fast Forward: x{simSpeed}
-      </button>
+        <button
+          type="button"
+          onClick={() => setShowCarGrid(v => !v)}
+          style={controlButtonStyle}
+        >
+          Cars Grid: {showCarGrid ? "ON" : "OFF"}
+        </button>
 
-      <button
-        onClick={() => setPaused(v => !v)}
-        style={{
-          position: "absolute",
-          zIndex: 10,
-          margin: 12,
-          marginLeft: 278,
-          padding: "8px 12px",
-          background: "black",
-          color: "white",
-          border: "1px solid #333"
-        }}
-      >
-        {paused ? "Resume" : "Pause"}
-      </button>
+        <button
+          type="button"
+          onClick={() => setSimSpeed(s => nextSimSpeed(s))}
+          style={controlButtonStyle}
+        >
+          Fast Forward: x{simSpeed}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setPaused(v => !v)}
+          style={controlButtonStyle}
+        >
+          {paused ? "Resume" : "Pause"}
+        </button>
+      </div>
 
       <div
         style={{
@@ -793,61 +1065,165 @@ function App() {
         ))}
       </div>
 
-      <div
-        style={{
-          position: "absolute",
-          zIndex: 10,
-          margin: 12,
-          marginTop: 112,
-          padding: "8px 12px",
-          background: "rgba(0,0,0,0.78)",
-          color: "white",
-          border: "1px solid #333",
-          fontFamily: "sans-serif",
-          fontSize: 13
-        }}
-      >
-        <div>Simulated Time: {clockLabel}</div>
-        <div style={{opacity: 0.8}}>Traffic state: {trafficStateLabel(currentHour)}</div>
-        <div style={{opacity: 0.75}}>Commute flow: {commuteFlowLabel(currentHour)}</div>
-        <div style={{opacity: 0.75}}>Commute wave: {commuteWaveLabel(currentHour)}</div>
-        <div style={{opacity: 0.8}}>
-          Traffic profile: green (free flow) to red (congested)
+      <div style={telemetryPanelStyle}>
+        <button
+          type="button"
+          aria-expanded={!telemetryCollapsed}
+          onClick={() => setTelemetryCollapsed(v => !v)}
+          style={{
+            width: "100%",
+            border: 0,
+            padding: "10px 12px",
+            background: "rgba(255,255,255,0.04)",
+            color: "white",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 12,
+            fontFamily: "sans-serif",
+            cursor: "pointer"
+          }}
+        >
+          <span style={{display: "flex", flexDirection: "column", alignItems: "flex-start", gap: 2}}>
+            <span style={{fontSize: 11, letterSpacing: 0, opacity: 0.58}}>Telemetry</span>
+            <span style={{fontSize: 15, fontWeight: 700}}>Simulated Time: {clockLabel}</span>
+          </span>
+          <span style={{display: "flex", alignItems: "center", gap: 10, fontSize: 12}}>
+            <span
+              style={{
+                padding: "4px 8px",
+                borderRadius: 999,
+                background: paused ? "rgba(250,204,21,0.16)" : "rgba(0,210,165,0.16)",
+                color: paused ? "#fde68a" : "#99f6e4",
+                border: paused ? "1px solid rgba(250,204,21,0.34)" : "1px solid rgba(0,210,165,0.34)"
+              }}
+            >
+              {paused ? "Paused" : "Running"}
+            </span>
+            <span style={{opacity: 0.74}}>{telemetryCollapsed ? "Show" : "Hide"}</span>
+          </span>
+        </button>
+
+        {!telemetryCollapsed && (
+          <div style={{padding: "10px 12px 12px", lineHeight: 1.42}}>
+            <div style={{opacity: 0.8}}>Traffic state: {trafficStateLabel(currentHour)}</div>
+            <div style={{opacity: 0.75}}>Commute flow: {commuteFlowLabel(currentHour)}</div>
+            <div style={{opacity: 0.75}}>Commute wave: {commuteWaveLabel(currentHour)}</div>
+            <div style={{opacity: 0.8}}>
+              Traffic profile: green (free flow) to red (congested)
+            </div>
+            <div style={{opacity: 0.75}}>
+              Traffic congestion range (global): {globalCongestionScale.min.toFixed(2)} -{" "}
+              {globalCongestionScale.max.toFixed(2)}
+            </div>
+            <div style={{opacity: 0.75}}>
+              Traffic color scale (global p05-p95): {globalCongestionScale.p05.toFixed(2)} -{" "}
+              {globalCongestionScale.p95.toFixed(2)}
+            </div>
+            <div style={{opacity: 0.72}}>
+              Legend: green &lt;1.5, yellow ~2.1, orange ~2.8, red &gt;3.2
+            </div>
+            <div style={{opacity: 0.8}}>
+              Population: blue (low) to red (high), grid 50x50
+            </div>
+            <div style={{opacity: 0.78}}>
+              Cars grid: {showCarGrid ? "ON" : "OFF"} ({carGridStats.snapMode})
+            </div>
+            <div style={{opacity: 0.65}}>
+              Occupied cells: {carGridStats.occupiedCells}/{carGridStats.totalCells || "?"} | cars mapped:{" "}
+              {carGridStats.carsInGrid}/{uberCars.length}
+            </div>
+            <div style={{opacity: 0.75}}>
+              Population time factor: {(POPULATION_HOURLY_MULTIPLIER[currentHour] ?? 1).toFixed(2)}x
+            </div>
+            <div style={{opacity: 0.75}}>
+              Dataset: {datasetReady ? "OSMnx loaded" : "fallback trips only"}
+            </div>
+            <div style={{opacity: 0.65}}>
+              Density range: {Math.round(densityStats.min)} - {Math.round(densityStats.max)}
+            </div>
+            <div style={{opacity: 0.65}}>
+              Flow speed x{flowFactor.toFixed(2)}
+            </div>
+            <div style={{opacity: 0.65}}>
+              Current hour congestion: mean {currentHourCongestion.mean.toFixed(2)} | p90{" "}
+              {currentHourCongestion.p90.toFixed(2)}
+            </div>
+            <div style={{opacity: 0.65}}>
+              Hot roads: {(currentHourCongestion.hotShare * 100).toFixed(0)}%
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div style={demoStatsPanelStyle}>
+        <div style={{display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 12}}>
+          <div>
+            <div style={{fontSize: 11, opacity: 0.58}}>Demo Stats</div>
+            <div style={{fontSize: 17, fontWeight: 800}}>Dispatch Performance</div>
+          </div>
+          <div
+            style={{
+              alignSelf: "flex-start",
+              padding: "5px 8px",
+              borderRadius: 999,
+              background: "rgba(0,210,165,0.14)",
+              color: "#99f6e4",
+              border: "1px solid rgba(0,210,165,0.3)",
+              fontSize: 12
+            }}
+          >
+            Live
+          </div>
         </div>
-        <div style={{opacity: 0.75}}>
-          Traffic congestion range (global): {globalCongestionScale.min.toFixed(2)} -{" "}
-          {globalCongestionScale.max.toFixed(2)}
+
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(2, minmax(0, 1fr))",
+            gap: 10
+          }}
+        >
+          {demoStatItems.map(item => (
+            <div
+              key={item.label}
+              style={{
+                minHeight: 104,
+                padding: 12,
+                borderRadius: 8,
+                background: "rgba(255,255,255,0.055)",
+                border: "1px solid rgba(255,255,255,0.09)",
+                boxShadow: `inset 3px 0 0 ${item.accent}`
+              }}
+            >
+              <div style={{fontSize: 11, opacity: 0.6, marginBottom: 7}}>{item.label}</div>
+              <div style={{fontSize: 25, fontWeight: 800, lineHeight: 1, color: item.accent}}>
+                {item.value}
+              </div>
+              <div style={{fontSize: 12, opacity: 0.64, marginTop: 8}}>{item.detail}</div>
+              {item.progress !== undefined && (
+                <div
+                  style={{
+                    height: 6,
+                    borderRadius: 999,
+                    background: "rgba(255,255,255,0.12)",
+                    overflow: "hidden",
+                    marginTop: 12
+                  }}
+                >
+                  <div
+                    style={{
+                      width: `${item.progress}%`,
+                      height: "100%",
+                      borderRadius: 999,
+                      background: item.accent
+                    }}
+                  />
+                </div>
+              )}
+            </div>
+          ))}
         </div>
-        <div style={{opacity: 0.75}}>
-          Traffic color scale (global p05-p95): {globalCongestionScale.p05.toFixed(2)} -{" "}
-          {globalCongestionScale.p95.toFixed(2)}
-        </div>
-        <div style={{opacity: 0.72}}>
-          Legend: green &lt;1.5, yellow ~2.1, orange ~2.8, red &gt;3.2
-        </div>
-        <div style={{opacity: 0.8}}>
-          Population: blue (low) to red (high), grid 50x50
-        </div>
-        <div style={{opacity: 0.75}}>
-          Population time factor: {(POPULATION_HOURLY_MULTIPLIER[currentHour] ?? 1).toFixed(2)}x
-        </div>
-        <div style={{opacity: 0.75}}>
-          Dataset: {datasetReady ? "OSMnx loaded" : "fallback trips only"}
-        </div>
-        <div style={{opacity: 0.65}}>
-          Density range: {Math.round(densityStats.min)} - {Math.round(densityStats.max)}
-        </div>
-        <div style={{opacity: 0.65}}>
-          Flow speed x{flowFactor.toFixed(2)}
-        </div>
-        <div style={{opacity: 0.65}}>
-          Current hour congestion: mean {currentHourCongestion.mean.toFixed(2)} | p90{" "}
-          {currentHourCongestion.p90.toFixed(2)}
-        </div>
-        <div style={{opacity: 0.65}}>
-          Hot roads: {(currentHourCongestion.hotShare * 100).toFixed(0)}%
-        </div>
-        <div style={{opacity: 0.65}}>Simulation: {paused ? "Paused" : "Running"}</div>
       </div>
 
       {keyMissing && (
@@ -888,6 +1264,18 @@ function App() {
         layers={layers}
         getTooltip={({object, layer}) => {
           if (!object || !layer) return null;
+          if (layer.id === "car-presence-grid") {
+            const p = object.properties ?? {};
+            const nodeIds = p.snapped_node_ids ?? [];
+            return {
+              text:
+                `grid cell [${p.row}, ${p.col}]\n` +
+                `cars present: ${p.has_car ? "yes" : "no"}\n` +
+                `car count: ${p.car_count ?? 0}\n` +
+                `intersection nodes in cell: ${p.intersection_count ?? 0}\n` +
+                `snapped intersections: ${nodeIds.length ? nodeIds.join(", ") : "none"}`
+            };
+          }
           if (layer.id === "population-grid") {
             const row = object.properties?.row ?? 0;
             const col = object.properties?.col ?? 0;
