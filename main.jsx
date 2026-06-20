@@ -757,31 +757,20 @@ function makeGreedyRouteFeatureCollection(snapshot, grid, kindFilter = null) {
   const assignments = activeGreedyAssignments(snapshot);
   const features = [];
   for (const assignment of assignments) {
-    const pickupCoords =
-      assignment.pickup_route?.coordinates ?? routePathToCoordinates(assignment.pickup_route?.path, grid);
-    const dropoffCoords =
-      assignment.dropoff_route?.coordinates ?? routePathToCoordinates(assignment.dropoff_route?.path, grid);
-    if ((!kindFilter || kindFilter === "to_pickup") && pickupCoords.length >= 2) {
+    const activeCoords =
+      assignment.route?.coordinates ??
+      assignment.active_route?.coordinates ??
+      assignment.dropoff_route?.coordinates ??
+      routePathToCoordinates(assignment.dropoff_route?.path, grid);
+    if ((!kindFilter || kindFilter === "to_dropoff") && activeCoords.length >= 2) {
       features.push({
         type: "Feature",
-        geometry: {type: "LineString", coordinates: pickupCoords},
+        geometry: {type: "LineString", coordinates: activeCoords},
         properties: {
-          kind: "to_pickup",
+          kind: "active_route",
           car_id: assignment.car_id,
           person_id: assignment.person_id,
-          cost: assignment.pickup_route?.cost ?? 0
-        }
-      });
-    }
-    if ((!kindFilter || kindFilter === "to_dropoff") && dropoffCoords.length >= 2) {
-      features.push({
-        type: "Feature",
-        geometry: {type: "LineString", coordinates: dropoffCoords},
-        properties: {
-          kind: "to_dropoff",
-          car_id: assignment.car_id,
-          person_id: assignment.person_id,
-          cost: assignment.dropoff_route?.cost ?? 0
+          cost: assignment.route?.cost ?? assignment.total_cost ?? assignment.dropoff_route?.cost ?? 0
         }
       });
     }
@@ -800,10 +789,14 @@ function greedyCarPoints(snapshot, grid, clockMinute = 0, stepMinutes = 15) {
       .map(car => {
         if (!car.position) return null;
         const assignment = assignmentByCarId.get(car.id);
-        const dropoffCoords = assignment?.dropoff_route?.coordinates ?? [];
+        const routeCoords =
+          assignment?.route?.coordinates ??
+          assignment?.active_route?.coordinates ??
+          assignment?.dropoff_route?.coordinates ??
+          [];
         const animatedPosition =
-          assignment && dropoffCoords.length >= 2
-            ? interpolatePathPosition(dropoffCoords, progress)
+          assignment && routeCoords.length >= 2
+            ? interpolatePathPosition(routeCoords, progress)
             : null;
         return {
           ...car,
@@ -1931,7 +1924,7 @@ function App() {
             const p = object.properties ?? {};
             return {
               text:
-                `Pickup to dropoff\n` +
+                `Active car route\n` +
                 `car: ${p.car_id}\n` +
                 `person: ${p.person_id}\n` +
                 `traffic-weighted cost: ${Number(p.cost ?? 0).toFixed(2)}`

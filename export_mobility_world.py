@@ -27,6 +27,7 @@ class MapGraph:
             int(node["node_id"]): node
             for node in nodes_payload.get("nodes", [])
         }
+        self._route_cache: dict[tuple[int, int, int], dict] = {}
         self.nodes_by_grid: dict[tuple[int, int], list[dict]] = {}
         for node in self.nodes.values():
             self.nodes_by_grid.setdefault((int(node["grid_row"]), int(node["grid_col"])), []).append(node)
@@ -88,9 +89,15 @@ class MapGraph:
     def route(self, start_node: int, goal_node: int, hour: int) -> dict:
         start_node = int(start_node)
         goal_node = int(goal_node)
+        cache_key = (start_node, goal_node, int(hour) % 24)
+        if cache_key in self._route_cache:
+            return self._route_cache[cache_key]
+
         if start_node == goal_node:
             point = self.node_position(start_node)
-            return {"node_path": [start_node], "coordinates": [point], "cost": 0.0, "fallback": False}
+            route = {"node_path": [start_node], "coordinates": [point], "cost": 0.0, "fallback": False}
+            self._route_cache[cache_key] = route
+            return route
 
         frontier = [(0.0, start_node)]
         best = {start_node: 0.0}
@@ -112,7 +119,9 @@ class MapGraph:
                     heapq.heappush(frontier, (next_cost, to_node))
 
         if goal_node not in best:
-            return self._direct_fallback_route(start_node, goal_node)
+            route = self._direct_fallback_route(start_node, goal_node)
+            self._route_cache[cache_key] = route
+            return route
 
         node_path = [goal_node]
         edge_path = []
@@ -130,12 +139,14 @@ class MapGraph:
                 coordinates.extend(coords)
             else:
                 coordinates.extend(coords[1:])
-        return {
+        route = {
             "node_path": node_path,
             "coordinates": coordinates,
             "cost": round(best[goal_node], 6),
             "fallback": False,
         }
+        self._route_cache[cache_key] = route
+        return route
 
     def _direct_fallback_route(self, start_node: int, goal_node: int) -> dict:
         start = self.node_position(start_node)
@@ -161,36 +172,186 @@ def seed_car_nodes(graph: MapGraph, seed: int, fleet_size: int) -> list[int]:
     return [node_ids[rng.randrange(len(node_ids))] for _ in range(fleet_size)]
 
 
-def build_map_dispatch(graph: MapGraph, people: list, timestep: int, seed: int, fleet_size: int) -> dict:
-    hour = (timestep // 60) % 24
-    car_nodes = seed_car_nodes(graph, seed + timestep, fleet_size)
-    cars = [
-        {
-            "id": f"car-{idx}",
-            "node_id": node_id,
-            "position": graph.node_position(node_id),
-            "grid_cell": [
-                int(graph.nodes[node_id]["grid_row"]),
-                int(graph.nodes[node_id]["grid_col"]),
-            ],
-            "status": "idle",
-            "assigned_person_id": None,
-            "stall_ticks": 1,
+def grid_cell_for_position(position: list[float], grid: dict) -> list[int] | None:
+    bounds = grid.get("bounds") or {}
+    rows = int(grid.get("rows", 0))
+    cols = int(grid.get("cols", 0))
+    min_lon = bounds.get("min_lon")
+    max_lon = bounds.get("max_lon")
+    min_lat = bounds.get("min_lat")
+    max_lat = bounds.get("max_lat")
+    if not rows or not cols or min_lon is None or max_lon is None or min_lat is None or max_lat is None:
+        return None
+    lon, lat = float(position[0]), float(position[1])
+    col = int((lon - float(min_lon)) / max(1e-9, float(max_lon) - float(min_lon)) * cols)
+    row = int((lat - float(min_lat)) / max(1e-9, float(max_lat) - float(min_lat)) * rows)
+    return [max(0, min(rows - 1, row)), max(0, min(cols - 1, col))]
+
+
+def distance_m(a: list[float], b: list[float]) -> float:
+    mean_lat = math.radians((float(a[1]) + float(b[1])) / 2.0)
+    dx = (float(b[0]) - float(a[0])) * math.cos(mean_lat) * 111_320
+    dy = (float(b[1]) - float(a[1])) * 111_320
+    return math.hypot(dx, dy)
+
+
+def interpolate_position(coordinates: list[list[float]], progress: float) -> list[float]:
+    if not coordinates:
+        return [0.0, 0.0]
+    if len(coordinates) == 1:
+        return coordinates[0]
+
+    target = max(0.0, min(1.0, progress))
+    segments = []
+    total = 0.0
+    for idx in range(len(coordinates) - 1):
+        length = distance_m(coordinates[idx], coordinates[idx + 1])
+        segments.append(length)
+        total += length
+    if total <= 0.0:
+        return coordinates[0]
+
+    remaining = total * target
+    for idx, length in enumerate(segments):
+        if remaining > length:
+            remaining -= length
+            continue
+        t = 0.0 if length <= 0 else remaining / length
+        a = coordinates[idx]
+        b = coordinates[idx + 1]
+        return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t]
+    return coordinates[-1]
+
+
+def merge_route_coordinates(*routes: dict) -> list[list[float]]:
+    coordinates: list[list[float]] = []
+    for route in routes:
+        route_coords = route.get("coordinates") or []
+        if not route_coords:
+            continue
+        if not coordinates:
+            coordinates.extend(route_coords)
+        else:
+            coordinates.extend(route_coords[1:])
+    return coordinates
+
+
+class StatefulMapDispatch:
+    def __init__(
+        self,
+        graph: MapGraph,
+        grid: dict,
+        seed: int,
+        fleet_size: int,
+        candidate_limit: int = 8,
+    ) -> None:
+        self.graph = graph
+        self.grid = grid
+        self.seed = int(seed)
+        self.candidate_limit = int(candidate_limit)
+        self.cars = []
+        for idx, node_id in enumerate(seed_car_nodes(graph, seed, fleet_size)):
+            node = graph.nodes[node_id]
+            self.cars.append(
+                {
+                    "id": f"car-{idx}",
+                    "node_id": int(node_id),
+                    "position": graph.node_position(node_id),
+                    "grid_cell": [int(node["grid_row"]), int(node["grid_col"])],
+                    "status": "idle",
+                    "assigned_person_id": None,
+                    "stall_ticks": 0,
+                    "assignment": None,
+                    "route_elapsed": 0.0,
+                }
+            )
+        self.pending: list[dict] = []
+        self.total_requests = 0
+        self.completed_trips = 0
+        self.canceled_requests = 0
+        self.revenue = 0.0
+
+    def add_requests(self, people: list, timestep: int) -> None:
+        for person in people:
+            self.pending.append(
+                {
+                    "person": person,
+                    "payload": self._map_person(person, "waiting"),
+                    "created_at": timestep,
+                }
+            )
+            self.total_requests += 1
+
+    def step(self, timestep: int, people: list) -> dict:
+        self._expire_requests(timestep)
+        self.add_requests(people, timestep)
+        new_assignments = self._assign_waiting(timestep)
+        active_assignments = [
+            car["assignment"]
+            for car in self.cars
+            if car.get("assignment") is not None
+        ]
+        active_people_ids = {assignment["person_id"] for assignment in active_assignments}
+        map_people = [
+            {**item["payload"], "status": "assigned" if item["payload"]["id"] in active_people_ids else "waiting"}
+            for item in self.pending
+        ]
+        active_cars = sum(1 for car in self.cars if car["status"] != "idle")
+        stalled_cars = len(self.cars) - active_cars
+        matched_requests = self.completed_trips + len(active_people_ids)
+        demand_served = matched_requests / max(1, self.total_requests) * 100.0
+
+        return {
+            "map_people": map_people,
+            "map_dispatch": {
+                "assignments": active_assignments,
+                "new_assignments": new_assignments,
+                "cars": [self._car_payload(car) for car in self.cars],
+                "summary": {
+                    "num_assignments": len(active_assignments),
+                    "num_new_assignments": len(new_assignments),
+                    "num_unassigned_people": len(map_people) - len(active_people_ids),
+                    "num_stalled_cars": stalled_cars,
+                    "num_active_cars": active_cars,
+                },
+            },
+            "map_greedy_stats": {
+                "completed_trips": self.completed_trips,
+                "revenue": round(self.revenue, 2),
+                "demand_served_pct": round(demand_served, 2),
+                "fleet_utilization_pct": round(active_cars / max(1, len(self.cars)) * 100.0, 2),
+                "active_cars": active_cars,
+                "stalled_cars": stalled_cars,
+                "unassigned_people": len(map_people) - len(active_people_ids),
+                "canceled_requests": self.canceled_requests,
+                "total_requests": self.total_requests,
+            },
         }
-        for idx, node_id in enumerate(car_nodes)
-    ]
 
-    map_people = []
-    assignments = []
-    idle_car_indexes = list(range(len(cars)))
-    assigned_person_ids = set()
+    def advance(self, seconds: float) -> None:
+        for car in self.cars:
+            assignment = car.get("assignment")
+            if assignment is None:
+                car["stall_ticks"] += 1
+                continue
 
-    for person in people:
-        pickup_node = graph.nearest_node_for_cell(person.origin)
-        dropoff_node = graph.nearest_node_for_cell(person.destination)
-        person_payload = person.to_dict()
-        person_payload.update(
+            route = assignment["route"]
+            total_cost = max(1.0, float(route["cost"]))
+            car["route_elapsed"] = min(total_cost, float(car["route_elapsed"]) + float(seconds))
+            progress = car["route_elapsed"] / total_cost
+            car["position"] = interpolate_position(route["coordinates"], progress)
+            car["grid_cell"] = grid_cell_for_position(car["position"], self.grid)
+            car["status"] = "to_pickup" if car["route_elapsed"] < assignment["pickup_route"]["cost"] else "to_dropoff"
+            if car["route_elapsed"] >= total_cost:
+                self._complete_trip(car)
+
+    def _map_person(self, person, status: str) -> dict:
+        pickup_node = self.graph.nearest_node_for_cell(person.origin)
+        dropoff_node = self.graph.nearest_node_for_cell(person.destination)
+        payload = person.to_dict()
+        payload.update(
             {
+                "status": status,
                 "pickup_node_id": int(pickup_node["node_id"]),
                 "dropoff_node_id": int(dropoff_node["node_id"]),
                 "pickup_position": [float(pickup_node["lon"]), float(pickup_node["lat"])],
@@ -201,73 +362,118 @@ def build_map_dispatch(graph: MapGraph, people: list, timestep: int, seed: int, 
                 "request_destination": list(person.destination),
             }
         )
-        map_people.append(person_payload)
+        return payload
 
-        best = None
-        for car_idx in idle_car_indexes:
-            route_to_pickup = graph.route(cars[car_idx]["node_id"], pickup_node["node_id"], hour)
-            cost = route_to_pickup["cost"]
-            if best is None or cost < best[0]:
-                best = (cost, car_idx, route_to_pickup)
-        if best is None:
-            continue
+    def _expire_requests(self, timestep: int) -> None:
+        retained = []
+        for item in self.pending:
+            payload = item["payload"]
+            if payload.get("status") == "assigned":
+                retained.append(item)
+                continue
+            if timestep - int(item["created_at"]) > int(payload.get("patience", 15)):
+                self.canceled_requests += 1
+            else:
+                retained.append(item)
+        self.pending = retained
 
-        _, car_idx, pickup_route = best
-        idle_car_indexes.remove(car_idx)
-        dropoff_route = graph.route(pickup_node["node_id"], dropoff_node["node_id"], hour)
-        cars[car_idx].update(
-            {
-                "status": "to_pickup",
-                "assigned_person_id": person.id,
-                "pickup_node_id": int(pickup_node["node_id"]),
-                "dropoff_node_id": int(dropoff_node["node_id"]),
-                "stall_ticks": 0,
-            }
-        )
-        if len(pickup_route["coordinates"]) > 1:
-            cars[car_idx]["position"] = pickup_route["coordinates"][1]
-        assignments.append(
-            {
-                "car_id": cars[car_idx]["id"],
-                "person_id": person.id,
-                "pickup_node_id": int(pickup_node["node_id"]),
-                "dropoff_node_id": int(dropoff_node["node_id"]),
-                "pickup_position": [float(pickup_node["lon"]), float(pickup_node["lat"])],
-                "dropoff_position": [float(dropoff_node["lon"]), float(dropoff_node["lat"])],
+    def _assign_waiting(self, timestep: int) -> list[dict]:
+        hour = (timestep // 60) % 24
+        waiting = [item for item in self.pending if item["payload"].get("status") != "assigned"]
+        idle_cars = [car for car in self.cars if car["status"] == "idle" and car.get("assignment") is None]
+        assignments = []
+
+        for item in waiting:
+            if not idle_cars:
+                break
+            payload = item["payload"]
+            pickup_node_id = int(payload["pickup_node_id"])
+            dropoff_node_id = int(payload["dropoff_node_id"])
+            pickup_position = payload["pickup_position"]
+            candidates = sorted(
+                enumerate(idle_cars),
+                key=lambda pair: distance_m(pair[1]["position"], pickup_position),
+            )[: self.candidate_limit]
+
+            best = None
+            for idle_idx, car in candidates:
+                route_to_pickup = self.graph.route(int(car["node_id"]), pickup_node_id, hour)
+                cost = float(route_to_pickup["cost"])
+                if best is None or cost < best[0]:
+                    best = (cost, idle_idx, car, route_to_pickup)
+            if best is None:
+                continue
+
+            _, idle_idx, car, pickup_route = best
+            idle_cars.pop(idle_idx)
+            dropoff_route = self.graph.route(pickup_node_id, dropoff_node_id, hour)
+            full_coords = merge_route_coordinates(pickup_route, dropoff_route)
+            full_cost = float(pickup_route["cost"]) + float(dropoff_route["cost"])
+            assignment = {
+                "car_id": car["id"],
+                "person_id": payload["id"],
+                "assigned_at": timestep,
+                "pickup_node_id": pickup_node_id,
+                "dropoff_node_id": dropoff_node_id,
+                "pickup_position": payload["pickup_position"],
+                "dropoff_position": payload["dropoff_position"],
+                "pickup_grid_cell": payload["pickup_grid_cell"],
+                "dropoff_grid_cell": payload["dropoff_grid_cell"],
                 "pickup_route": pickup_route,
                 "dropoff_route": dropoff_route,
-                "total_cost": round(pickup_route["cost"] + dropoff_route["cost"], 6),
+                "route": {
+                    "coordinates": full_coords,
+                    "cost": round(full_cost, 6),
+                    "fallback": bool(pickup_route.get("fallback")) or bool(dropoff_route.get("fallback")),
+                },
+                "total_cost": round(full_cost, 6),
             }
-        )
-        assigned_person_ids.add(person.id)
+            payload["status"] = "assigned"
+            car.update(
+                {
+                    "status": "to_pickup",
+                    "assigned_person_id": payload["id"],
+                    "pickup_node_id": pickup_node_id,
+                    "dropoff_node_id": dropoff_node_id,
+                    "stall_ticks": 0,
+                    "assignment": assignment,
+                    "route_elapsed": 0.0,
+                }
+            )
+            assignments.append(assignment)
 
-    active_cars = len(assignments)
-    stalled_cars = len(cars) - active_cars
-    assigned_people = [person for person in people if person.id in assigned_person_ids]
-    stats = {
-        "completed_trips": len(assigned_people),
-        "revenue": round(sum(person.value for person in assigned_people), 2),
-        "demand_served_pct": round(len(assigned_people) / len(people) * 100.0, 2) if people else 100.0,
-        "fleet_utilization_pct": round(active_cars / max(1, len(cars)) * 100.0, 2),
-        "active_cars": active_cars,
-        "stalled_cars": stalled_cars,
-        "unassigned_people": len(people) - len(assigned_people),
-    }
+        return assignments
 
-    return {
-        "map_people": map_people,
-        "map_dispatch": {
-            "assignments": assignments,
-            "cars": cars,
-            "summary": {
-                "num_assignments": len(assignments),
-                "num_unassigned_people": stats["unassigned_people"],
-                "num_stalled_cars": stalled_cars,
-                "num_active_cars": active_cars,
-            },
-        },
-        "map_greedy_stats": stats,
-    }
+    def _complete_trip(self, car: dict) -> None:
+        assignment = car["assignment"]
+        car["position"] = assignment["dropoff_position"]
+        car["grid_cell"] = assignment["dropoff_grid_cell"]
+        car["node_id"] = assignment["dropoff_node_id"]
+        car["status"] = "idle"
+        car["assigned_person_id"] = None
+        car["assignment"] = None
+        car["route_elapsed"] = 0.0
+        car["stall_ticks"] = 0
+        self.completed_trips += 1
+        person_id = assignment["person_id"]
+        for item in list(self.pending):
+            if item["payload"]["id"] == person_id:
+                self.revenue += float(item["payload"].get("value", 0.0))
+                self.pending.remove(item)
+                break
+
+    def _car_payload(self, car: dict) -> dict:
+        return {
+            "id": car["id"],
+            "node_id": car["node_id"],
+            "position": car["position"],
+            "grid_cell": car.get("grid_cell"),
+            "status": car["status"],
+            "assigned_person_id": car.get("assigned_person_id"),
+            "pickup_node_id": car.get("pickup_node_id"),
+            "dropoff_node_id": car.get("dropoff_node_id"),
+            "stall_ticks": car["stall_ticks"],
+        }
 
 
 def main() -> None:
@@ -278,7 +484,7 @@ def main() -> None:
     parser.add_argument("--edges-geojson", default="public/data/osmnx_edges.geojson")
     parser.add_argument("--out", default="public/data/mobility_world.json")
     parser.add_argument("--seed", default=7, type=int)
-    parser.add_argument("--fleet-size", default=16, type=int)
+    parser.add_argument("--fleet-size", default=40, type=int)
     parser.add_argument("--step-minutes", default=15, type=int)
     args = parser.parse_args()
 
@@ -288,11 +494,15 @@ def main() -> None:
         load_json(Path(args.edges)),
         load_json(Path(args.edges_geojson)),
     )
+    dispatcher = StatefulMapDispatch(
+        graph,
+        grid,
+        seed=args.seed,
+        fleet_size=args.fleet_size,
+        candidate_limit=6,
+    )
     snapshots = []
-    cumulative_completed = 0
-    cumulative_revenue = 0.0
-    cumulative_requests = 0
-    cumulative_served = 0
+    step_seconds = max(1, args.step_minutes) * 60
     for timestep in range(0, 24 * 60, max(1, args.step_minutes)):
         demand = DemandGenerator(grid=grid, seed=args.seed + timestep + 1)
         traffic = TrafficGenerator(grid=grid, seed=args.seed + timestep + 2)
@@ -300,26 +510,13 @@ def main() -> None:
             grid=grid,
             seed=args.seed + timestep + 3,
             base_arrival_rate=2.8,
-            max_new_people_per_tick=7,
+            max_new_people_per_tick=6,
         )
         demand_heatmap = demand.get_heatmap(timestep)
         traffic_heatmap = traffic.get_heatmap(timestep, demand_heatmap)
         people = people_generator.generate(timestep, demand_heatmap, traffic_heatmap)
-        map_payload = build_map_dispatch(graph, people, timestep, args.seed, args.fleet_size)
-        tick_stats = map_payload["map_greedy_stats"]
-        cumulative_completed += int(tick_stats["completed_trips"])
-        cumulative_revenue += float(tick_stats["revenue"])
-        cumulative_requests += len(people)
-        cumulative_served += int(tick_stats["completed_trips"])
-        greedy_stats = {
-            **tick_stats,
-            "completed_trips": cumulative_completed,
-            "revenue": round(cumulative_revenue, 2),
-            "demand_served_pct": round(
-                cumulative_served / max(1, cumulative_requests) * 100.0,
-                2,
-            ),
-        }
+        map_payload = dispatcher.step(timestep, people)
+        greedy_stats = map_payload["map_greedy_stats"]
         snapshot = {
             "timestep": timestep,
             "demand_heatmap": demand_heatmap,
@@ -340,6 +537,7 @@ def main() -> None:
         snapshot["map_dispatch"] = map_payload["map_dispatch"]
         snapshot["map_greedy_stats"] = greedy_stats
         snapshots.append(snapshot)
+        dispatcher.advance(step_seconds)
 
     payload = {
         "seed": args.seed,
