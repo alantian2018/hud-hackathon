@@ -493,6 +493,128 @@ function makeCarPresenceGridFeatureCollection(grid, carPresenceByCell, nodeCount
   };
 }
 
+function gridCellCenter(cell, grid) {
+  if (!cell || !grid?.bounds) return null;
+  const [row, col] = cell;
+  const {
+    rows,
+    cols,
+    bounds: {min_lon: minLon, max_lon: maxLon, min_lat: minLat, max_lat: maxLat}
+  } = grid;
+  const dLon = (maxLon - minLon) / cols;
+  const dLat = (maxLat - minLat) / rows;
+  return [minLon + (col + 0.5) * dLon, minLat + (row + 0.5) * dLat];
+}
+
+function gridCellPolygonFeature(cell, grid, properties) {
+  if (!cell || !grid?.bounds) return null;
+  const [row, col] = cell;
+  const {
+    rows,
+    cols,
+    bounds: {min_lon: minLon, max_lon: maxLon, min_lat: minLat, max_lat: maxLat}
+  } = grid;
+  if (row < 0 || row >= rows || col < 0 || col >= cols) return null;
+
+  const dLon = (maxLon - minLon) / cols;
+  const dLat = (maxLat - minLat) / rows;
+  const west = minLon + col * dLon;
+  const east = west + dLon;
+  const south = minLat + row * dLat;
+  const north = south + dLat;
+  return {
+    type: "Feature",
+    geometry: {
+      type: "Polygon",
+      coordinates: [
+        [
+          [west, south],
+          [east, south],
+          [east, north],
+          [west, north],
+          [west, south]
+        ]
+      ]
+    },
+    properties: {...properties, row, col}
+  };
+}
+
+function makeGreedyPeopleFeatureCollection(snapshot, grid) {
+  const markers = snapshot?.people_grid?.markers ?? [];
+  const features = [];
+  for (const marker of markers) {
+    const pickup = gridCellPolygonFeature(marker.pickup, grid, {
+      kind: "pickup",
+      person_id: marker.person_id,
+      paired_cell: marker.dropoff
+    });
+    const dropoff = gridCellPolygonFeature(marker.dropoff, grid, {
+      kind: "dropoff",
+      person_id: marker.person_id,
+      paired_cell: marker.pickup
+    });
+    if (pickup) features.push(pickup);
+    if (dropoff) features.push(dropoff);
+  }
+  return {type: "FeatureCollection", features};
+}
+
+function routePathToCoordinates(path, grid) {
+  return (path ?? [])
+    .map(cell => gridCellCenter(cell, grid))
+    .filter(Boolean);
+}
+
+function makeGreedyRouteFeatureCollection(snapshot, grid) {
+  const assignments = snapshot?.dispatch?.assignments ?? [];
+  const features = [];
+  for (const assignment of assignments) {
+    const pickupCoords = routePathToCoordinates(assignment.pickup_route?.path, grid);
+    const dropoffCoords = routePathToCoordinates(assignment.dropoff_route?.path, grid);
+    if (pickupCoords.length >= 2) {
+      features.push({
+        type: "Feature",
+        geometry: {type: "LineString", coordinates: pickupCoords},
+        properties: {
+          kind: "to_pickup",
+          car_id: assignment.car_id,
+          person_id: assignment.person_id,
+          cost: assignment.pickup_route?.cost ?? 0
+        }
+      });
+    }
+    if (dropoffCoords.length >= 2) {
+      features.push({
+        type: "Feature",
+        geometry: {type: "LineString", coordinates: dropoffCoords},
+        properties: {
+          kind: "to_dropoff",
+          car_id: assignment.car_id,
+          person_id: assignment.person_id,
+          cost: assignment.dropoff_route?.cost ?? 0
+        }
+      });
+    }
+  }
+  return {type: "FeatureCollection", features};
+}
+
+function greedyCarPoints(snapshot, grid) {
+  return (snapshot?.dispatch?.cars ?? [])
+    .map(car => {
+      const position = gridCellCenter(car.position, grid);
+      if (!position) return null;
+      return {...car, grid_position: car.position, position};
+    })
+    .filter(Boolean);
+}
+
+function circularMinuteDistance(a, b) {
+  const diff = Math.abs(a - b);
+  return Math.min(diff, 24 * 60 - diff);
+}
+
 function tripPositionAtTime(trip, clockMinute) {
   const path = trip?.path ?? [];
   const timestamps = trip?.timestamps ?? [];
@@ -532,6 +654,8 @@ function App() {
   const [datasetReady, setDatasetReady] = useState(false);
   const [showNodeDensity, setShowNodeDensity] = useState(false);
   const [showCarGrid, setShowCarGrid] = useState(false);
+  const [showGreedySim, setShowGreedySim] = useState(true);
+  const [mobilityWorld, setMobilityWorld] = useState(null);
   const [telemetryCollapsed, setTelemetryCollapsed] = useState(false);
 
   // Simulated clock in minutes across a day.
@@ -582,6 +706,26 @@ function App() {
     };
   }, []);
 
+  useEffect(() => {
+    let cancelled = false;
+
+    async function loadMobilityWorld() {
+      try {
+        const res = await fetch("/data/mobility_world.json");
+        if (!res.ok) return;
+        const data = await res.json();
+        if (!cancelled) setMobilityWorld(data);
+      } catch (_) {
+        // The Python export is optional; the map can still run without it.
+      }
+    }
+
+    loadMobilityWorld();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
   const currentHour = Math.floor(clockMinute / 60);
   const currentHourFloat = clockMinute / 60;
   const clockLabel = `${String(currentHour).padStart(2, "0")}:${String(
@@ -589,6 +733,17 @@ function App() {
   ).padStart(2, "0")}`;
   const flowFactor = trafficFlowSpeedFactor(currentHourFloat);
   const tripClockMinute = clockMinute * flowFactor;
+
+  const mobilitySnapshot = useMemo(() => {
+    const snapshots = mobilityWorld?.snapshots ?? [];
+    if (!snapshots.length) return null;
+    return snapshots.reduce((best, snapshot) => {
+      if (!best) return snapshot;
+      const bestDistance = circularMinuteDistance(best.timestep ?? 0, clockMinute);
+      const snapshotDistance = circularMinuteDistance(snapshot.timestep ?? 0, clockMinute);
+      return snapshotDistance < bestDistance ? snapshot : best;
+    }, null);
+  }, [mobilityWorld, clockMinute]);
 
   const nodeCountsByCell = useMemo(
     () => makeNodeCountsByGridCell(ppoNodes, populationGrid),
@@ -795,6 +950,20 @@ function App() {
   }, [carPresenceByCell, populationGrid, ppoNodes.length]);
 
   const demoStats = useMemo(() => {
+    const greedy = mobilitySnapshot?.greedy_stats;
+    if (greedy) {
+      return {
+        completedTrips: greedy.completed_trips ?? 0,
+        revenue: greedy.revenue ?? 0,
+        demandServed: greedy.demand_served_pct ?? 0,
+        fleetUtilization: greedy.fleet_utilization_pct ?? 0,
+        activeCars: greedy.active_cars ?? 0,
+        stalledCars: greedy.stalled_cars ?? 0,
+        unassignedPeople: greedy.unassigned_people ?? 0,
+        source: "greedy"
+      };
+    }
+
     const fleetSize = Math.max(uberCars.length, trips.length, 1);
     const dayProgress = clockMinute / (24 * 60);
     const congestionPenalty = clamp((currentHourCongestion.mean - 1.2) / 3, 0, 0.32);
@@ -819,7 +988,11 @@ function App() {
       completedTrips,
       revenue,
       demandServed,
-      fleetUtilization
+      fleetUtilization,
+      activeCars: uberCars.length,
+      stalledCars: 0,
+      unassignedPeople: 0,
+      source: "estimate"
     };
   }, [
     carGridStats.carsInGrid,
@@ -827,6 +1000,7 @@ function App() {
     currentHourCongestion,
     currentHourFloat,
     flowFactor,
+    mobilitySnapshot,
     trips.length,
     uberCars.length
   ]);
@@ -864,6 +1038,58 @@ function App() {
     });
   }, [showCarGrid, carPresenceGridGeoJson]);
 
+  const greedyPeopleLayer = useMemo(() => {
+    if (!showGreedySim || !mobilitySnapshot || !populationGrid) return null;
+    return new GeoJsonLayer({
+      id: "greedy-people-grid",
+      data: makeGreedyPeopleFeatureCollection(mobilitySnapshot, populationGrid),
+      stroked: true,
+      filled: true,
+      pickable: true,
+      autoHighlight: true,
+      highlightColor: [255, 255, 255, 85],
+      lineWidthMinPixels: 1.5,
+      getFillColor: f =>
+        f.properties?.kind === "pickup" ? [168, 85, 247, 155] : [249, 115, 22, 150],
+      getLineColor: f =>
+        f.properties?.kind === "pickup" ? [216, 180, 254, 245] : [253, 186, 116, 245]
+    });
+  }, [showGreedySim, mobilitySnapshot, populationGrid]);
+
+  const greedyRouteLayer = useMemo(() => {
+    if (!showGreedySim || !mobilitySnapshot || !populationGrid) return null;
+    return new GeoJsonLayer({
+      id: "greedy-dispatch-routes",
+      data: makeGreedyRouteFeatureCollection(mobilitySnapshot, populationGrid),
+      stroked: true,
+      filled: false,
+      pickable: true,
+      lineWidthMinPixels: 2,
+      lineWidthMaxPixels: 8,
+      getLineWidth: f => (f.properties?.kind === "to_pickup" ? 3 : 4),
+      getLineColor: f =>
+        f.properties?.kind === "to_pickup" ? [56, 189, 248, 220] : [0, 210, 165, 235]
+    });
+  }, [showGreedySim, mobilitySnapshot, populationGrid]);
+
+  const greedyCarLayer = useMemo(() => {
+    if (!showGreedySim || !mobilitySnapshot || !populationGrid) return null;
+    return new ScatterplotLayer({
+      id: "greedy-cars",
+      data: greedyCarPoints(mobilitySnapshot, populationGrid),
+      pickable: true,
+      radiusUnits: "meters",
+      radiusMinPixels: 5,
+      radiusMaxPixels: 13,
+      getRadius: d => (d.status === "idle" ? 34 : 46),
+      getPosition: d => d.position,
+      getFillColor: d => (d.status === "idle" ? [56, 189, 248, 230] : [0, 210, 165, 245]),
+      getLineColor: [255, 255, 255, 230],
+      lineWidthMinPixels: 1.5,
+      stroked: true
+    });
+  }, [showGreedySim, mobilitySnapshot, populationGrid]);
+
   const uberLayer = useMemo(
     () =>
       new IconLayer({
@@ -885,8 +1111,10 @@ function App() {
 
   const layers = [
     carPresenceGridLayer,
+    greedyPeopleLayer,
     edgeLayer,
     commuteWaveLayer,
+    greedyRouteLayer,
     nodeDensityLayer,
     new TripsLayer({
       id: "glow",
@@ -911,6 +1139,7 @@ function App() {
       trailLength: 55,
       currentTime: tripClockMinute
     }),
+    greedyCarLayer,
     uberLayer
   ].filter(Boolean);
 
@@ -959,7 +1188,10 @@ function App() {
     {
       label: "Completed Trips",
       value: demoStats.completedTrips.toLocaleString(),
-      detail: `${uberCars.length} active vehicles`,
+      detail:
+        demoStats.source === "greedy"
+          ? `${demoStats.activeCars} active, ${demoStats.stalledCars} stalled`
+          : `${uberCars.length} active vehicles`,
       accent: "#00d2a5"
     },
     {
@@ -971,14 +1203,17 @@ function App() {
     {
       label: "Demand Served",
       value: `${demoStats.demandServed.toFixed(0)}%`,
-      detail: "requests matched",
+      detail:
+        demoStats.source === "greedy"
+          ? `${demoStats.unassignedPeople} unassigned requests`
+          : "requests matched",
       progress: demoStats.demandServed,
       accent: "#facc15"
     },
     {
       label: "Fleet Utilization",
       value: `${demoStats.fleetUtilization.toFixed(0)}%`,
-      detail: "cars earning",
+      detail: demoStats.source === "greedy" ? "greedy assigned cars" : "cars earning",
       progress: demoStats.fleetUtilization,
       accent: "#fb7185"
     }
@@ -1013,6 +1248,14 @@ function App() {
           style={controlButtonStyle}
         >
           Cars Grid: {showCarGrid ? "ON" : "OFF"}
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setShowGreedySim(v => !v)}
+          style={controlButtonStyle}
+        >
+          Greedy: {showGreedySim ? "ON" : "OFF"}
         </button>
 
         <button
@@ -1129,6 +1372,11 @@ function App() {
             <div style={{opacity: 0.78}}>
               Cars grid: {showCarGrid ? "ON" : "OFF"} ({carGridStats.snapMode})
             </div>
+            <div style={{opacity: 0.78}}>
+              Greedy dispatch: {mobilitySnapshot ? `snapshot ${Math.floor((mobilitySnapshot.timestep ?? 0) / 60)
+                .toString()
+                .padStart(2, "0")}:00` : "not loaded"}
+            </div>
             <div style={{opacity: 0.65}}>
               Occupied cells: {carGridStats.occupiedCells}/{carGridStats.totalCells || "?"} | cars mapped:{" "}
               {carGridStats.carsInGrid}/{uberCars.length}
@@ -1159,7 +1407,9 @@ function App() {
       <div style={demoStatsPanelStyle}>
         <div style={{display: "flex", justifyContent: "space-between", gap: 12, marginBottom: 12}}>
           <div>
-            <div style={{fontSize: 11, opacity: 0.58}}>Demo Stats</div>
+            <div style={{fontSize: 11, opacity: 0.58}}>
+              {demoStats.source === "greedy" ? "Greedy Stats" : "Demo Stats"}
+            </div>
             <div style={{fontSize: 17, fontWeight: 800}}>Dispatch Performance</div>
           </div>
           <div
@@ -1264,6 +1514,35 @@ function App() {
         layers={layers}
         getTooltip={({object, layer}) => {
           if (!object || !layer) return null;
+          if (layer.id === "greedy-people-grid") {
+            const p = object.properties ?? {};
+            return {
+              text:
+                `${p.kind === "pickup" ? "Pickup" : "Dropoff"} grid [${p.row}, ${p.col}]\n` +
+                `person: ${p.person_id}\n` +
+                `paired cell: [${p.paired_cell?.[0] ?? "?"}, ${p.paired_cell?.[1] ?? "?"}]`
+            };
+          }
+          if (layer.id === "greedy-dispatch-routes") {
+            const p = object.properties ?? {};
+            return {
+              text:
+                `${p.kind === "to_pickup" ? "Car to pickup" : "Pickup to dropoff"}\n` +
+                `car: ${p.car_id}\n` +
+                `person: ${p.person_id}\n` +
+                `traffic-weighted cost: ${Number(p.cost ?? 0).toFixed(2)}`
+            };
+          }
+          if (layer.id === "greedy-cars") {
+            return {
+              text:
+                `${object.id}\n` +
+                `status: ${object.status}\n` +
+                `grid: [${object.grid_position?.[0] ?? "?"}, ${object.grid_position?.[1] ?? "?"}]\n` +
+                `person: ${object.assigned_person_id ?? "none"}\n` +
+                `stall ticks: ${object.stall_ticks ?? 0}`
+            };
+          }
           if (layer.id === "car-presence-grid") {
             const p = object.properties ?? {};
             const nodeIds = p.snapped_node_ids ?? [];
