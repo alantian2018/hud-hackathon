@@ -46,6 +46,7 @@ const PEOPLE_GRID_EMPTY_FILL = [18, 34, 52, 0];
 const PEOPLE_GRID_EMPTY_LINE = [138, 180, 248, 34];
 const PEOPLE_GRID_BOTH_FILL = [168, 85, 247, 155];
 const PEOPLE_GRID_BOTH_LINE = [216, 180, 254, 230];
+const FEATURE_GRID_CELLS_CACHE = new WeakMap();
 
 function buildStyleUrl() {
   return `https://api.maptiler.com/maps/streets-v2-dark/style.json?key=${MAPTILER_KEY}`;
@@ -450,6 +451,109 @@ function gridCellForPosition(position, grid) {
   return {row, col, key: gridKey(row, col)};
 }
 
+function edgeCentroid(feature) {
+  const coords = feature?.geometry?.coordinates ?? [];
+  if (!coords.length) return null;
+  const flatCoords = feature?.geometry?.type === "MultiLineString" ? coords.flat() : coords;
+  if (!flatCoords.length) return null;
+  const sum = flatCoords.reduce(
+    (acc, coord) => {
+      acc.longitude += coord[0] ?? 0;
+      acc.latitude += coord[1] ?? 0;
+      return acc;
+    },
+    {longitude: 0, latitude: 0}
+  );
+  return {
+    longitude: sum.longitude / flatCoords.length,
+    latitude: sum.latitude / flatCoords.length
+  };
+}
+
+function registerGridCell(cells, coord, grid) {
+  const cell = gridCellForPosition(coord, grid);
+  if (cell) cells.set(cell.key, cell);
+}
+
+function gridCellsForFeature(feature, grid) {
+  if (!feature || !grid) return [];
+  const cached = FEATURE_GRID_CELLS_CACHE.get(feature);
+  if (cached) return cached;
+
+  const geometry = feature.geometry ?? {};
+  const lines =
+    geometry.type === "MultiLineString"
+      ? geometry.coordinates ?? []
+      : geometry.type === "LineString"
+        ? [geometry.coordinates ?? []]
+        : [];
+  const cells = new Map();
+  for (const line of lines) {
+    for (let i = 0; i < line.length; i++) {
+      registerGridCell(cells, line[i], grid);
+      if (i === 0) continue;
+      const prev = line[i - 1];
+      const current = line[i];
+      const samples = Math.max(1, Math.ceil(routeSegmentMeters(prev, current) / 220));
+      for (let step = 1; step < samples; step++) {
+        const t = step / samples;
+        registerGridCell(
+          cells,
+          [
+            prev[0] + (current[0] - prev[0]) * t,
+            prev[1] + (current[1] - prev[1]) * t
+          ],
+          grid
+        );
+      }
+    }
+  }
+
+  if (!cells.size) {
+    const centroid = edgeCentroid(feature);
+    if (centroid) registerGridCell(cells, [centroid.longitude, centroid.latitude], grid);
+  }
+
+  const result = [...cells.values()];
+  FEATURE_GRID_CELLS_CACHE.set(feature, result);
+  return result;
+}
+
+function makeGeneratedTrafficPressureByCell(snapshot, grid) {
+  const hotspots = snapshot?.summary?.traffic_bottlenecks ?? [];
+  if (!hotspots.length || !grid?.rows || !grid?.cols) return null;
+
+  const rows = grid.rows;
+  const cols = grid.cols;
+  const values = new Float32Array(rows * cols);
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      let influence = 0;
+      for (const hotspot of hotspots) {
+        const hotRow = Number(hotspot.row);
+        const hotCol = Number(hotspot.col);
+        const value = Number(hotspot.value);
+        if (!Number.isFinite(hotRow) || !Number.isFinite(hotCol) || !Number.isFinite(value)) continue;
+        const dist = Math.hypot(row - hotRow, col - hotCol);
+        influence = Math.max(influence, value * Math.exp(-(dist * dist) / (2 * 3.2 * 3.2)));
+      }
+      const normalized = clamp((influence - 0.45) / 0.55, 0, 1);
+      values[row * cols + col] = 1 + normalized * 2.8;
+    }
+  }
+  return {rows, cols, values};
+}
+
+function generatedTrafficMultiplierForEdge(feature, pressureByCell, grid) {
+  if (!pressureByCell || !grid) return 1;
+  const cells = gridCellsForFeature(feature, grid);
+  let multiplier = 1;
+  for (const cell of cells) {
+    multiplier = Math.max(multiplier, pressureByCell.values[cell.row * pressureByCell.cols + cell.col] || 1);
+  }
+  return multiplier;
+}
+
 function makeNodeCountsByGridCell(nodes, grid) {
   const counts = new Map();
   for (const node of nodes ?? []) {
@@ -604,10 +708,15 @@ function makeEventFeatureCollection(event) {
 }
 
 function trafficColor(value) {
-  if (value < 1.35) return [52, 168, 83, 185];
-  if (value < 1.9) return [251, 188, 4, 190];
-  if (value < 2.6) return [251, 140, 0, 205];
-  return [234, 67, 53, 220];
+  if (value < 1.25) return [52, 142, 94, 145];
+  if (value < 1.75) return [218, 166, 45, 152];
+  if (value < 2.35) return [224, 119, 45, 166];
+  return [220, 64, 58, 184];
+}
+
+function roadCongestionForFeature(feature, currentHour, trafficPressureByCell, grid) {
+  const base = Number(feature?.properties?.hourly_congestion_factor?.[currentHour] ?? 1);
+  return (Number.isFinite(base) ? base : 1) * generatedTrafficMultiplierForEdge(feature, trafficPressureByCell, grid);
 }
 
 function metricsFor(snapshot, policyId) {
@@ -661,6 +770,10 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
     () => makePeopleGridFeatureCollection(snapshot, grid, clockMinute, stepMinutes),
     [snapshot, grid, clockMinute, stepMinutes]
   );
+  const trafficPressureByCell = useMemo(
+    () => makeGeneratedTrafficPressureByCell(snapshot, grid),
+    [snapshot, grid]
+  );
   const metrics = metricsFor(snapshot, policy.id);
   const currentHour = Math.floor(clamp(clockMinute, 0, DAY_MINUTES - 1) / 60);
   const layers = useMemo(() => {
@@ -671,16 +784,20 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
           stroked: true,
           filled: false,
           lineWidthMinPixels: 1.25,
-          lineWidthMaxPixels: 6,
+          lineWidthMaxPixels: 4.75,
           getLineWidth: f => {
-            const base = f.properties?.hourly_congestion_factor?.[currentHour] ?? 1;
-            return 1.25 + clamp((base - 1) / 3, 0, 1) * 4.4;
+            const congestion = roadCongestionForFeature(f, currentHour, trafficPressureByCell, grid);
+            return 0.95 + clamp((congestion - 1) / 3.4, 0, 1) * 3.65;
           },
-          getLineColor: f => trafficColor(f.properties?.hourly_congestion_factor?.[currentHour] ?? 1),
+          getLineColor: f => trafficColor(roadCongestionForFeature(f, currentHour, trafficPressureByCell, grid)),
           lineCapRounded: true,
           lineJointRounded: true,
           parameters: {depthTest: false},
-          pickable: false
+          pickable: true,
+          updateTriggers: {
+            getLineWidth: [currentHour, trafficPressureByCell, grid],
+            getLineColor: [currentHour, trafficPressureByCell, grid]
+          }
         })
       : null;
     const carGrid = carGridData
@@ -805,7 +922,7 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
         })
       : null;
     return [carGrid, peopleGrid, roads, surgeArea, routeCasing, routes, people, carLayer, surgeCore].filter(Boolean);
-  }, [network, grid, carGridData, peopleGridData, policy, snapshot, routeIndex, clockMinute, stepMinutes, cars, currentHour, event]);
+  }, [network, grid, carGridData, peopleGridData, policy, snapshot, routeIndex, clockMinute, stepMinutes, cars, currentHour, event, trafficPressureByCell]);
 
   return (
     <section style={{position: "relative", height, minHeight: height, overflow: "hidden"}}>
@@ -834,6 +951,11 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
           if (layer.id.endsWith("-people-grid")) {
             const p = object.properties ?? {};
             return {text: `grid cell [${p.row}, ${p.col}]\npickups: ${p.pickup_count ?? 0}\ndestinations: ${p.dropoff_count ?? 0}`};
+          }
+          if (layer.id.endsWith("-roads")) {
+            const p = object.properties ?? {};
+            const congestion = roadCongestionForFeature(object, currentHour, trafficPressureByCell, grid);
+            return {text: `${p.name ?? "road"}\ntraffic: ${congestion.toFixed(2)}x\nhour: ${currentHour}:00`};
           }
           return null;
         }}
@@ -895,10 +1017,10 @@ function Metric({label, value}) {
 
 function TrafficLegend() {
   const items = [
-    ["Light", [52, 168, 83, 225]],
-    ["Moderate", [251, 188, 4, 230]],
-    ["Heavy", [251, 140, 0, 235]],
-    ["Severe", [234, 67, 53, 240]]
+    ["Light", [52, 142, 94, 145]],
+    ["Moderate", [218, 166, 45, 152]],
+    ["Heavy", [224, 119, 45, 166]],
+    ["Severe", [220, 64, 58, 184]]
   ];
   return (
     <div style={{display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end"}}>
