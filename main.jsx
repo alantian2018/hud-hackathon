@@ -7,7 +7,7 @@ import {StaticMap} from "react-map-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
 
-const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY ?? "";
+const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY || "4WonZ3glTzG3MWfQd6gQ";
 const POPULATION_HOURLY_MULTIPLIER = [
   0.82, 0.78, 0.74, 0.72, 0.74, 0.82, 0.96, 1.1, 1.18, 1.2, 1.16, 1.1,
   1.06, 1.02, 1.0, 1.04, 1.12, 1.2, 1.14, 1.04, 0.96, 0.9, 0.86, 0.84
