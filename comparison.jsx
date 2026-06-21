@@ -886,14 +886,34 @@ function buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinut
   if (snapshot?.is_pre_frame || clockMinute < 0) {
     rows.push(
       {
-        tool: "mobility_tools.list_scenarios",
-        call: "list_scenarios()",
-        output: "Base, Chase Exit, Market Surge, FiDi Surge available; waiting for Start Both"
+        tool: "mobility_tools.forecast_hotspots",
+        call: "forecast_hotspots(episode_id, lookahead_steps=3, k=8)",
+        output: `hotspots=queued for ${scenario.label}; traffic=queued; waiting for Start Both`
       },
       {
         tool: "mobility_tools.propose_full_plan",
         call: "propose_full_plan(episode_id)",
         output: `candidate_plan={assignments:0, repositions:0, holds:${fleetSize}}; goal=${scenario.agentChallenge}`
+      },
+      {
+        tool: "mobility_tools.propose_matching",
+        call: "propose_matching(episode_id)",
+        output: "0 assignment candidates before requests enter the frame"
+      },
+      {
+        tool: "mobility_tools.propose_repositioning",
+        call: "propose_repositioning(episode_id, assigned_car_ids_json=[])",
+        output: `0 repositions before clock start; standby supply=${fleetSize}`
+      },
+      {
+        tool: "mobility_tools.critique_action_plan",
+        call: "critique_action_plan(episode_id, plan_json={...})",
+        output: `${scenario.failureMode}; plan held until simulation start`
+      },
+      {
+        tool: "mobility_tools.step_world",
+        call: "step_world(episode_id, plan_json={assignments,repositions,holds})",
+        output: "not advanced yet; first step applies when Start Both is pressed"
       }
     );
     return rows;
@@ -1699,11 +1719,12 @@ function ControlBar({
   clockLabel,
   greedySnapshot,
   rlSnapshot,
-  compare,
+  mode,
   events,
   activeEventId,
   onEventChange
 }) {
+  const compare = mode === "compare";
   return (
     <header style={{
       minHeight: 110,
@@ -1747,8 +1768,9 @@ function ControlBar({
       </div>
       <div style={{display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 9, minWidth: 0}}>
         <div style={{display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end"}}>
-          <a href="/greedy.html" style={navButtonStyle}>Greedy Page</a>
-          <a href="/rl.html" style={navButtonStyle}>Agentic Fleet</a>
+          {mode !== "compare" && <a href="/compare.html" style={navButtonStyle}>FleetForge Demo</a>}
+          {mode !== "greedy" && <a href="/greedy.html" style={navButtonStyle}>Greedy Page</a>}
+          {mode !== "rl" && <a href="/rl.html" style={navButtonStyle}>Agentic Fleet</a>}
           <span style={{
             padding: "8px 11px",
             border: "1px solid rgba(148,163,184,0.32)",
@@ -1828,7 +1850,7 @@ function useComparisonData() {
   return state;
 }
 
-function ComparisonShell({compare}) {
+function ComparisonShell({mode}) {
   const data = useComparisonData();
   const [clockMinute, setClockMinute] = useState(PRE_FRAME_MINUTE);
   const [running, setRunning] = useState(false);
@@ -1890,6 +1912,7 @@ function ComparisonShell({compare}) {
   const rlSnapshot = snapshotAt(rlSnapshots, clockMinute);
   const finalGreedySnapshot = greedySnapshots.at(-1);
   const finalRlSnapshot = rlSnapshots.at(-1);
+  const compare = mode === "compare";
   const isAtEnd = clockMinute >= endMinute - 0.01;
   const showBusinessImpact = compare && isAtEnd && !impactDismissed;
   const onStart = () => {
@@ -1921,7 +1944,7 @@ function ComparisonShell({compare}) {
         clockLabel={formatClock(clockMinute)}
         greedySnapshot={greedySnapshot}
         rlSnapshot={rlSnapshot}
-        compare={compare}
+        mode={mode}
         events={events}
         activeEventId={activeEventId}
         onEventChange={onEventChange}
@@ -1961,15 +1984,15 @@ function ComparisonShell({compare}) {
         </div>
       ) : (
         <MapPanel
-          policy={RL}
-          world={data.rlWorld}
+          policy={mode === "greedy" ? GREEDY : RL}
+          world={mode === "greedy" ? data.greedyWorld : data.rlWorld}
           network={data.network}
           grid={data.grid}
           nodes={data.nodes}
-          snapshot={rlSnapshot}
-          routeIndex={data.rlWorld.routes}
+          snapshot={mode === "greedy" ? greedySnapshot : rlSnapshot}
+          routeIndex={mode === "greedy" ? data.greedyWorld.routes : data.rlWorld.routes}
           clockMinute={clockMinute}
-          stepMinutes={rlStep}
+          stepMinutes={mode === "greedy" ? greedyStep : rlStep}
           viewState={viewState}
           setViewState={setViewState}
           height={mapHeight}
@@ -1977,14 +2000,16 @@ function ComparisonShell({compare}) {
         />
       )}
       <MapLegend />
-      <AgentTracePanel
-        snapshot={rlSnapshot}
-        finalSnapshot={finalRlSnapshot}
-        world={data.rlWorld}
-        event={activeEvent}
-        clockMinute={clockMinute}
-        done={isAtEnd}
-      />
+      {mode !== "greedy" && (
+        <AgentTracePanel
+          snapshot={rlSnapshot}
+          finalSnapshot={finalRlSnapshot}
+          world={data.rlWorld}
+          event={activeEvent}
+          clockMinute={clockMinute}
+          done={isAtEnd}
+        />
+      )}
       <BusinessImpactOverlay
         greedySnapshot={finalGreedySnapshot}
         rlSnapshot={finalRlSnapshot}
@@ -1998,4 +2023,6 @@ function ComparisonShell({compare}) {
 document.body.style.margin = 0;
 const root = document.createElement("div");
 document.body.appendChild(root);
-createRoot(root).render(<ComparisonShell compare={!window.location.pathname.includes("rl.html")} />);
+const path = window.location.pathname;
+const mode = path.includes("greedy.html") ? "greedy" : path.includes("rl.html") ? "rl" : "compare";
+createRoot(root).render(<ComparisonShell mode={mode} />);

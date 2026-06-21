@@ -1,0 +1,9 @@
+{
+  "redirects": [
+    {
+      "source": "/",
+      "destination": "/compare.html",
+      "permanent": false
+    }
+  ]
+}

@@ -13,6 +13,7 @@
   },
   "scripts": {
     "build:osmnx": "python3 map.py",
+    "build": "vite build",
     "dev": "vite --host 127.0.0.1 --port 5173"
   }
 }
