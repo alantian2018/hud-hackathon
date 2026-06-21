@@ -91,6 +91,8 @@ def test_rich_renderer_draws_info_hud_without_matplotlib() -> None:
     assert "time" in hud_text
     assert "current car" in hud_text
     assert "reward" in hud_text
+    assert "aggregate reward" in hud_text
+    assert "avg wait last 10" in hud_text
     assert "action mask" in hud_text
 
 

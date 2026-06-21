@@ -23,6 +23,7 @@ REQUEST_COMPLETED = 4
 REQUEST_DROPPED = 5
 
 _INF = 1.0e20
+_RECENT_PICKUP_WAIT_WINDOW = 10
 _POPULATION_HOURLY_MULTIPLIER = np.asarray(
     [
         0.82,
@@ -168,10 +169,15 @@ def reset(rng, params: EnvParams) -> tuple[EnvState, Timestep]:
             completed_requests=jnp.asarray(0, dtype=jnp.int32),
             queued_requests=jnp.asarray(0, dtype=jnp.int32),
             pickup_wait_seconds=jnp.asarray(0.0, dtype=jnp.float32),
+            aggregate_reward=jnp.asarray(0.0, dtype=jnp.float32),
+            recent_pickup_wait_seconds=jnp.zeros((_RECENT_PICKUP_WAIT_WINDOW,), dtype=jnp.float32),
+            recent_pickup_wait_count=jnp.asarray(0, dtype=jnp.int32),
+            recent_pickup_wait_index=jnp.asarray(0, dtype=jnp.int32),
         ),
     )
     state, reward = _process_events_at_time(state, params, jnp.asarray(0.0, dtype=jnp.float32))
     state, reward = _advance_until_decision(state, params, reward)
+    state = _add_transition_reward(state, reward)
     return state, _make_timestep(state, params, reward, state.time_seconds - start)
 
 
@@ -183,6 +189,7 @@ def step(state: EnvState, action, params: EnvParams) -> tuple[EnvState, Timestep
         next_state, reward = _process_events_at_time(applied, params, jnp.asarray(0.0, dtype=jnp.float32))
         next_state, reward = _advance_until_decision(next_state, params, reward)
         next_state = next_state.replace(step_count=next_state.step_count + 1)
+        next_state = _add_transition_reward(next_state, reward)
         return next_state, reward
 
     def noop(s: EnvState):
@@ -656,6 +663,7 @@ def _assign_request_to_car(
     state = state.replace(request_assigned_car_ids=state.request_assigned_car_ids.at[request_id].set(car))
 
     def pickup_now(s: EnvState):
+        s = _record_pickup_wait(s, request_id)
         s = s.replace(
             request_status=s.request_status.at[request_id].set(REQUEST_ONBOARD),
             request_pickup_times=s.request_pickup_times.at[request_id].set(s.time_seconds),
@@ -683,6 +691,7 @@ def _finish_pickup(
 ) -> tuple[EnvState, jnp.ndarray]:
     request_id = jnp.clip(state.car_request_ids[car], 0, params.max_requests - 1)
     dest = state.request_dest_nodes[request_id]
+    state = _record_pickup_wait(state, request_id)
     state = state.replace(
         request_status=state.request_status.at[request_id].set(REQUEST_ONBOARD),
         request_pickup_times=state.request_pickup_times.at[request_id].set(state.time_seconds),
@@ -703,7 +712,6 @@ def _finish_dropoff(
     reward = reward - params.wait_time_scale * wait
     metrics = state.metrics.replace(
         completed_requests=state.metrics.completed_requests + jnp.asarray(1, dtype=jnp.int32),
-        pickup_wait_seconds=state.metrics.pickup_wait_seconds + wait,
     )
     state = state.replace(
         request_status=state.request_status.at[request_id].set(REQUEST_COMPLETED),
@@ -714,6 +722,32 @@ def _finish_dropoff(
         metrics=metrics,
     )
     return state, reward
+
+
+def _record_pickup_wait(state: EnvState, request_id) -> EnvState:
+    request_id = jnp.clip(jnp.asarray(request_id, dtype=jnp.int32), 0, state.request_spawn_times.shape[0] - 1)
+    wait = jnp.maximum(0.0, state.time_seconds - state.request_spawn_times[request_id])
+    slot = jnp.mod(state.metrics.recent_pickup_wait_index, _RECENT_PICKUP_WAIT_WINDOW)
+    metrics = state.metrics.replace(
+        pickup_wait_seconds=state.metrics.pickup_wait_seconds + wait,
+        recent_pickup_wait_seconds=state.metrics.recent_pickup_wait_seconds.at[slot].set(wait),
+        recent_pickup_wait_count=jnp.minimum(
+            state.metrics.recent_pickup_wait_count + jnp.asarray(1, dtype=jnp.int32),
+            jnp.asarray(_RECENT_PICKUP_WAIT_WINDOW, dtype=jnp.int32),
+        ),
+        recent_pickup_wait_index=jnp.mod(
+            state.metrics.recent_pickup_wait_index + jnp.asarray(1, dtype=jnp.int32),
+            jnp.asarray(_RECENT_PICKUP_WAIT_WINDOW, dtype=jnp.int32),
+        ),
+    )
+    return state.replace(metrics=metrics)
+
+
+def _add_transition_reward(state: EnvState, reward) -> EnvState:
+    metrics = state.metrics.replace(
+        aggregate_reward=state.metrics.aggregate_reward + jnp.asarray(reward, dtype=jnp.float32)
+    )
+    return state.replace(metrics=metrics)
 
 
 def _start_auto_edge(

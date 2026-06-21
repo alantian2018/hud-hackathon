@@ -12,6 +12,7 @@ from jax_fleet.env import (
     REQUEST_COMPLETED,
     REQUEST_ONBOARD,
     REQUEST_QUEUED,
+    _record_pickup_wait,
     make_env_params,
     nearest_eligible_car_by_eta,
     reset,
@@ -163,6 +164,42 @@ def test_dt_seconds_discount_and_sparse_pickup_reward() -> None:
 
     assert math.isclose(float(ts.discount), 0.99 ** (9.0 / 60.0), rel_tol=1e-6)
     assert math.isclose(float(ts.reward), -3.0 / 60.0, rel_tol=1e-6)
+
+
+def test_pickup_wait_average_and_aggregate_reward_metrics() -> None:
+    params = make_env_params(
+        tiny_graph(),
+        max_cars=1,
+        max_requests=4,
+        initial_car_nodes=[0],
+        preplanned_requests=[{"spawn_time_s": 2.0, "origin": 1, "destination": 3}],
+    )
+    state, timestep = reset(jax.random.PRNGKey(3), params)
+
+    state, timestep = step(state, jnp.int32(0), params)
+    scene = export_scene(state, timestep, params)
+
+    assert math.isclose(float(state.metrics.aggregate_reward), float(timestep.reward), rel_tol=1e-6)
+    assert int(state.metrics.recent_pickup_wait_count) == 1
+    assert math.isclose(scene["metrics"]["avg_pickup_wait_last_10_seconds"], 3.0, rel_tol=1e-6)
+    assert math.isclose(scene["metrics"]["aggregate_reward"], -3.0 / 60.0, rel_tol=1e-6)
+
+
+def test_recent_pickup_wait_metric_keeps_only_last_ten_pickups() -> None:
+    params = make_env_params(tiny_graph(), max_cars=1, max_requests=2, initial_car_nodes=[0])
+    state, _ = reset(jax.random.PRNGKey(4), params)
+    state = state.replace(request_spawn_times=state.request_spawn_times.at[0].set(0.0))
+
+    for wait_seconds in range(1, 13):
+        state = state.replace(time_seconds=jnp.asarray(float(wait_seconds), dtype=jnp.float32))
+        state = _record_pickup_wait(state, jnp.int32(0))
+
+    assert int(state.metrics.recent_pickup_wait_count) == 10
+    assert math.isclose(
+        float(state.metrics.recent_pickup_wait_seconds.sum()) / float(state.metrics.recent_pickup_wait_count),
+        7.5,
+        rel_tol=1e-6,
+    )
 
 
 def test_low_default_demand_smoke_stays_finite() -> None:
