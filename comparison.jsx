@@ -1524,7 +1524,7 @@ function formatSignedDecimal(value, digits = 1) {
   return `${sign}${Math.abs(numeric).toFixed(digits)}`;
 }
 
-function BusinessImpactOverlay({greedySnapshot, rlSnapshot, visible}) {
+function BusinessImpactOverlay({greedySnapshot, rlSnapshot, visible, onClose}) {
   if (!visible) return null;
   const greedy = metricsFor(greedySnapshot, "greedy");
   const rl = metricsFor(rlSnapshot, "rl");
@@ -1532,26 +1532,28 @@ function BusinessImpactOverlay({greedySnapshot, rlSnapshot, visible}) {
   const revenueDelta = Number(rl.revenue ?? 0) - Number(greedy.revenue ?? 0);
   const demandDelta = Number(rl.demand_served_pct ?? 0) - Number(greedy.demand_served_pct ?? 0);
   const waitDelta = avgWaitMinutes(rl) - avgWaitMinutes(greedy);
+  const waitImproved = waitDelta <= 0;
+  const waitSaved = Math.max(0, Math.round(Math.abs(waitDelta)));
   const rows = [
     {
       value: formatSignedInteger(tripDelta),
-      label: "completed trips",
+      label: "additional completed trips",
       good: tripDelta >= 0
     },
     {
       value: formatSignedDollars(revenueDelta),
-      label: "revenue",
+      label: "profit",
       good: revenueDelta >= 0
     },
     {
-      value: formatSignedDecimal(demandDelta, 1),
-      label: "percentage points demand served",
+      value: `${formatSignedDecimal(demandDelta, 1)}%`,
+      label: "extra demand met",
       good: demandDelta >= 0
     },
     {
-      value: formatSignedDecimal(waitDelta, 1),
-      label: "minutes average wait",
-      good: waitDelta <= 0
+      value: String(waitSaved),
+      label: `${waitSaved === 1 ? "minute" : "minutes"} ${waitImproved ? "saved from" : "added to"} each passenger`,
+      good: waitImproved
     }
   ];
 
@@ -1566,11 +1568,12 @@ function BusinessImpactOverlay({greedySnapshot, rlSnapshot, visible}) {
       background: "linear-gradient(180deg, rgba(2,6,23,0.36), rgba(2,6,23,0.68))",
       color: "white",
       fontFamily: "system-ui, sans-serif",
-      pointerEvents: "none",
+      pointerEvents: "auto",
       zIndex: 20
     }}>
       <div style={{
         width: "min(780px, calc(100vw - 48px))",
+        position: "relative",
         borderRadius: 10,
         background: "rgba(4,8,14,0.94)",
         border: "1px solid rgba(125,211,252,0.26)",
@@ -1579,34 +1582,37 @@ function BusinessImpactOverlay({greedySnapshot, rlSnapshot, visible}) {
         backdropFilter: "blur(14px)"
       }}>
         <div style={{
-          display: "flex",
-          alignItems: "center",
-          justifyContent: "space-between",
-          gap: 14,
-          padding: "16px 18px",
+          padding: "18px 54px 16px 18px",
           borderBottom: "1px solid rgba(148,163,184,0.16)",
           background: "linear-gradient(90deg, rgba(20,184,166,0.16), rgba(14,165,233,0.08), rgba(15,23,42,0))"
         }}>
-          <div>
-            <div style={{fontSize: 12, opacity: 0.68, fontWeight: 850, textTransform: "uppercase", letterSpacing: 0}}>
-              Simulation complete
-            </div>
-            <div style={{fontSize: 30, fontWeight: 920, lineHeight: 1.05, marginTop: 4}}>
-              Business Impact
-            </div>
+          <div style={{fontSize: 32, fontWeight: 930, lineHeight: 1.02}}>
+            Business Impact
           </div>
-          <div style={{
-            padding: "8px 10px",
-            borderRadius: 8,
-            background: "rgba(15,23,42,0.82)",
-            border: "1px solid rgba(45,212,191,0.24)",
-            color: "#99f6e4",
-            fontSize: 12,
-            fontWeight: 850,
-            whiteSpace: "nowrap"
-          }}>
-            Final fleet result
-          </div>
+          <button
+            type="button"
+            aria-label="Close business impact"
+            onClick={onClose}
+            style={{
+              position: "absolute",
+              top: 14,
+              right: 14,
+              width: 32,
+              height: 32,
+              borderRadius: 999,
+              border: "1px solid rgba(248,113,113,0.58)",
+              background: "rgba(127,29,29,0.72)",
+              color: "#fecaca",
+              cursor: "pointer",
+              fontSize: 16,
+              lineHeight: "30px",
+              fontWeight: 950,
+              textAlign: "center",
+              boxShadow: "0 10px 28px rgba(0,0,0,0.32)"
+            }}
+          >
+            X
+          </button>
         </div>
         <div style={{padding: 18}}>
           <div style={{display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10}}>
@@ -1632,21 +1638,11 @@ function BusinessImpactOverlay({greedySnapshot, rlSnapshot, visible}) {
                 }}>
                   {row.value}
                 </div>
-                <div style={{fontSize: 12, opacity: 0.78, marginTop: 12, fontWeight: 760, lineHeight: 1.25}}>
+                <div style={{fontSize: 17, opacity: 0.86, marginTop: 12, fontWeight: 840, lineHeight: 1.2}}>
                   {row.label}
                 </div>
               </div>
             ))}
-          </div>
-          <div style={{
-            marginTop: 13,
-            paddingTop: 13,
-            borderTop: "1px solid rgba(148,163,184,0.14)",
-            color: "rgba(226,232,240,0.68)",
-            fontSize: 12,
-            fontWeight: 700
-          }}>
-            Final frame is frozen so judges can inspect the result without rerunning the simulation.
           </div>
         </div>
       </div>
@@ -1833,6 +1829,7 @@ function ComparisonShell({compare}) {
   const [speed, setSpeed] = useState(0.5);
   const [activeEventId, setActiveEventId] = useState(null);
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
+  const [impactDismissed, setImpactDismissed] = useState(false);
 
   const events = useMemo(
     () => eventChoices(data.greedyWorld, data.rlWorld),
@@ -1888,19 +1885,22 @@ function ComparisonShell({compare}) {
   const finalGreedySnapshot = greedySnapshots.at(-1);
   const finalRlSnapshot = rlSnapshots.at(-1);
   const isAtEnd = clockMinute >= endMinute - 0.01;
-  const showBusinessImpact = compare && isAtEnd;
+  const showBusinessImpact = compare && isAtEnd && !impactDismissed;
   const onStart = () => {
     if (clockMinute >= endMinute - 0.01) setClockMinute(PRE_FRAME_MINUTE);
+    setImpactDismissed(false);
     setRunning(true);
   };
   const onReset = () => {
     setClockMinute(PRE_FRAME_MINUTE);
     setRunning(false);
+    setImpactDismissed(false);
   };
   const onEventChange = nextEventId => {
     setActiveEventId(nextEventId);
     setClockMinute(PRE_FRAME_MINUTE);
     setRunning(false);
+    setImpactDismissed(false);
   };
 
   return (
@@ -1984,6 +1984,7 @@ function ComparisonShell({compare}) {
         greedySnapshot={finalGreedySnapshot}
         rlSnapshot={finalRlSnapshot}
         visible={showBusinessImpact}
+        onClose={() => setImpactDismissed(true)}
       />
     </main>
   );

@@ -1978,7 +1978,7 @@ function App() {
           Agentic Fleet
         </a>
 
-        <a href="/" style={{...controlButtonStyle, textDecoration: "none"}}>
+        <a href="/compare.html" style={{...controlButtonStyle, textDecoration: "none"}}>
           FleetForge Demo
         </a>
 
