@@ -28,6 +28,10 @@ const DOWNTOWN_CONGESTION_CENTERS = [
   {longitude: -122.419, latitude: 37.775, weight: 0.85} // Civic / Mission corridor
 ];
 const COMMUTE_CORE = {longitude: -122.407, latitude: 37.787};
+const DAY_MINUTES = 24 * 60;
+const SIM_RESET_MINUTE = 0;
+const SIM_START_MINUTE = 7 * 60;
+const SIM_END_MINUTE = DAY_MINUTES - 0.001;
 const SIM_SPEED_STEPS = [0.1, 0.5, 1, 4, 12, 30];
 const TIME_PRESETS = [
   {label: "02:00", minute: 2 * 60},
@@ -902,7 +906,7 @@ function resolveRoute(route, routeIndex = {}) {
 function snapshotElapsedMinutes(snapshot, clockMinute, stepMinutes) {
   if (!snapshot) return 0;
   const start = snapshot.timestep ?? 0;
-  const elapsed = (((clockMinute - start) % (24 * 60)) + 24 * 60) % (24 * 60);
+  const elapsed = Math.max(0, clockMinute - start);
   return clamp(elapsed, 0, Math.max(1, stepMinutes));
 }
 
@@ -1049,7 +1053,7 @@ function snapshotWaitTimeMinutes(snapshot) {
 }
 
 function App() {
-  const [clockMinute, setClockMinute] = useState(7 * 60);
+  const [clockMinute, setClockMinute] = useState(SIM_START_MINUTE);
   const [simSpeed, setSimSpeed] = useState(0.1);
   const [paused, setPaused] = useState(false);
   const [keyMissing, setKeyMissing] = useState(MAPTILER_KEY === "YOUR_MAPTILER_KEY");
@@ -1066,15 +1070,6 @@ function App() {
   const [mobilityWorldStatus, setMobilityWorldStatus] = useState("loading");
   const [activeEventId, setActiveEventId] = useState(null);
   const [telemetryCollapsed, setTelemetryCollapsed] = useState(true);
-
-  // Simulated clock in minutes across a day.
-  useEffect(() => {
-    const i = setInterval(() => {
-      if (paused) return;
-      setClockMinute(m => (m + simSpeed) % (24 * 60));
-    }, 50);
-    return () => clearInterval(i);
-  }, [simSpeed, paused]);
 
   // Load OSMnx-generated artifacts.
   useEffect(() => {
@@ -1145,7 +1140,7 @@ function App() {
     };
   }, []);
 
-  const normalizedClockMinute = ((clockMinute % (24 * 60)) + 24 * 60) % (24 * 60);
+  const normalizedClockMinute = clamp(clockMinute, SIM_RESET_MINUTE, SIM_END_MINUTE);
   const currentHour = Math.floor(normalizedClockMinute / 60);
   const currentMinute = Math.floor(normalizedClockMinute % 60);
   const currentHourFloat = normalizedClockMinute / 60;
@@ -1175,6 +1170,37 @@ function App() {
     return active;
   }, [mobilityWorld, activeScenario, clockMinute]);
   const mobilityStepMinutes = activeScenario?.step_minutes ?? mobilityWorld?.step_minutes ?? 15;
+  const simulationEndMinute = useMemo(() => {
+    const snapshots = activeScenario?.snapshots ?? mobilityWorld?.snapshots ?? [];
+    if (!snapshots.length) return SIM_END_MINUTE;
+    const lastTimestep = snapshots.reduce(
+      (latest, snapshot) => Math.max(latest, Number(snapshot.timestep) || 0),
+      0
+    );
+    return clamp(lastTimestep + mobilityStepMinutes - 0.001, SIM_RESET_MINUTE, SIM_END_MINUTE);
+  }, [activeScenario, mobilityWorld, mobilityStepMinutes]);
+  const atSimulationEnd = clockMinute >= simulationEndMinute - 0.01;
+
+  // Simulated clock runs once through the exported timeline. It pauses at the end
+  // so cumulative metrics stay on the final snapshot until the user restarts.
+  useEffect(() => {
+    const i = setInterval(() => {
+      if (paused) return;
+      setClockMinute(current => {
+        if (current >= simulationEndMinute) {
+          setPaused(true);
+          return simulationEndMinute;
+        }
+        const next = current + simSpeed;
+        if (next >= simulationEndMinute) {
+          setPaused(true);
+          return simulationEndMinute;
+        }
+        return next;
+      });
+    }, 50);
+    return () => clearInterval(i);
+  }, [simSpeed, paused, simulationEndMinute]);
 
   const nodeCountsByCell = useMemo(
     () => makeNodeCountsByGridCell(ppoNodes, populationGrid),
@@ -1420,7 +1446,7 @@ function App() {
     }
 
     const fleetSize = Math.max(uberCars.length, trips.length, 1);
-    const dayProgress = clockMinute / (24 * 60);
+    const dayProgress = clamp(clockMinute / DAY_MINUTES, 0, 1);
     const congestionPenalty = clamp((currentHourCongestion.mean - 1.2) / 3, 0, 0.32);
     const activeShare = clamp(carGridStats.carsInGrid / fleetSize, 0, 1);
     const completedTrips = Math.round(
@@ -1896,7 +1922,14 @@ function App() {
 
         <button
           type="button"
-          onClick={() => setPaused(v => !v)}
+          onClick={() => {
+            if (paused && atSimulationEnd) {
+              setClockMinute(SIM_RESET_MINUTE);
+              setPaused(false);
+              return;
+            }
+            setPaused(v => !v);
+          }}
           style={controlButtonStyle}
         >
           {paused ? "Resume" : "Pause"}
