@@ -158,6 +158,18 @@ function trafficColorFromCongestion(congestion) {
   return TRAFFIC_DARK_RED;
 }
 
+function congestionDisplayT(congestion, scale) {
+  const lo = scale?.lo ?? 1;
+  const hi = scale?.hi ?? 2.4;
+  const span = Math.max(0.22, hi - lo);
+  return clamp((congestion - lo) / span, 0, 1);
+}
+
+function trafficColorForDisplay(congestion, scale, alpha = 245) {
+  const [r, g, b] = trafficColorFromT(congestionDisplayT(congestion, scale), 255);
+  return [r, g, b, alpha];
+}
+
 function hourlyValue(values, hour) {
   if (!Array.isArray(values) || values.length === 0) return 1;
   const wrapped = ((hour % 24) + 24) % 24;
@@ -1288,6 +1300,21 @@ function App() {
     return {mean, p50: q(0.5), p90: q(0.9), hotShare};
   }, [network, trafficDisplayHour, generatedTrafficPressureByCell, populationGrid]);
 
+  const roadDisplayCongestionScale = useMemo(() => {
+    if (!network?.features?.length) return {lo: 1, hi: 2.2};
+    const vals = network.features
+      .map(
+        f =>
+          effectiveCongestionForEdge(f, trafficDisplayHour) *
+          generatedTrafficMultiplierForEdge(f, generatedTrafficPressureByCell, populationGrid)
+      )
+      .filter(v => typeof v === "number" && !Number.isNaN(v))
+      .sort((a, b) => a - b);
+    if (vals.length < 8) return {lo: 1, hi: 2.2};
+    const q = p => vals[Math.floor((vals.length - 1) * p)];
+    return {lo: q(0.16), hi: q(0.84)};
+  }, [network, trafficDisplayHour, generatedTrafficPressureByCell, populationGrid]);
+
   const edgeLayer = useMemo(() => {
     if (!network) return null;
 
@@ -1309,12 +1336,11 @@ function App() {
         const congestion =
           effectiveCongestionForEdge(f, trafficDisplayHour) *
           generatedTrafficMultiplierForEdge(f, generatedTrafficPressureByCell, populationGrid);
-        const [r, g, b] = trafficColorFromCongestion(congestion);
-        return [r, g, b, showGreedySim ? 130 : 245];
+        return trafficColorForDisplay(congestion, roadDisplayCongestionScale, showGreedySim ? 130 : 245);
       },
       updateTriggers: {
         getLineWidth: [trafficDisplayHour, showGreedySim, generatedTrafficPressureByCell, populationGrid],
-        getLineColor: [trafficDisplayHour, showGreedySim, generatedTrafficPressureByCell, populationGrid]
+        getLineColor: [trafficDisplayHour, showGreedySim, generatedTrafficPressureByCell, populationGrid, roadDisplayCongestionScale]
       },
       pickable: true,
       autoHighlight: true,
@@ -1341,7 +1367,7 @@ function App() {
         };
       }
     });
-  }, [network, currentHour, trafficDisplayHour, globalCongestionScale, showGreedySim, generatedTrafficPressureByCell, populationGrid]);
+  }, [network, currentHour, trafficDisplayHour, globalCongestionScale, showGreedySim, generatedTrafficPressureByCell, populationGrid, roadDisplayCongestionScale]);
 
   const commuteWaveLayer = useMemo(() => {
     if (!network || showGreedySim) return null;
@@ -2118,7 +2144,8 @@ function App() {
               {globalCongestionScale.p95.toFixed(2)}
             </div>
             <div style={{opacity: 0.72}}>
-              Legend: green &lt;1.5, yellow ~2.1, orange ~2.8, red &gt;3.2
+              Legend: relative congestion for this hour ({roadDisplayCongestionScale.lo.toFixed(2)} -{" "}
+              {roadDisplayCongestionScale.hi.toFixed(2)}), green to red gradient
             </div>
             <div style={{opacity: 0.8}}>
               Population: blue (low) to red (high), grid 50x50

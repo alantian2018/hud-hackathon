@@ -708,16 +708,51 @@ function makeEventFeatureCollection(event) {
   };
 }
 
-function trafficColor(value) {
-  if (value < 1.25) return [55, 124, 92, 104];
-  if (value < 1.75) return [185, 143, 54, 112];
-  if (value < 2.35) return [192, 103, 48, 124];
-  return [196, 58, 56, 138];
+function trafficColorFromT(t, alpha = 225) {
+  const x = clamp(t, 0, 1);
+  if (x <= 0.5) {
+    const k = x / 0.5;
+    return [Math.round(55 + 200 * k), Math.round(124 + 19 * k), Math.round(92 - 32 * k), alpha];
+  }
+  const k = (x - 0.5) / 0.5;
+  return [Math.round(196 + 59 * k), Math.round(58 + 85 * (1 - k)), Math.round(56 - 56 * k), alpha];
 }
 
-function roadCongestionForFeature(feature, currentHour, trafficPressureByCell, grid) {
-  const base = Number(feature?.properties?.hourly_congestion_factor?.[currentHour] ?? 1);
+function congestionDisplayT(congestion, scale) {
+  const lo = scale?.lo ?? 1;
+  const hi = scale?.hi ?? 2.4;
+  const span = Math.max(0.22, hi - lo);
+  return clamp((congestion - lo) / span, 0, 1);
+}
+
+function trafficColorForDisplay(congestion, scale, alpha = 120) {
+  return trafficColorFromT(congestionDisplayT(congestion, scale), alpha);
+}
+
+function hourlyValue(values, hour) {
+  if (!Array.isArray(values) || values.length === 0) return 1;
+  const wrapped = ((hour % 24) + 24) % 24;
+  const h0 = Math.floor(wrapped);
+  const h1 = (h0 + 1) % values.length;
+  const t = wrapped - h0;
+  return (values[h0] ?? values[0] ?? 1) * (1 - t) + (values[h1] ?? values[0] ?? 1) * t;
+}
+
+function roadCongestionForFeature(feature, hourFloat, trafficPressureByCell, grid) {
+  const base = hourlyValue(feature?.properties?.hourly_congestion_factor, hourFloat);
   return (Number.isFinite(base) ? base : 1) * generatedTrafficMultiplierForEdge(feature, trafficPressureByCell, grid);
+}
+
+function roadDisplayCongestionScale(network, hourFloat, trafficPressureByCell, grid) {
+  const features = network?.features ?? [];
+  if (!features.length) return {lo: 1, hi: 2.2};
+  const vals = features
+    .map(f => roadCongestionForFeature(f, hourFloat, trafficPressureByCell, grid))
+    .filter(v => Number.isFinite(v))
+    .sort((a, b) => a - b);
+  if (vals.length < 8) return {lo: 1, hi: 2.2};
+  const q = p => vals[Math.floor((vals.length - 1) * p)];
+  return {lo: q(0.16), hi: q(0.84)};
 }
 
 function metricsFor(snapshot, policyId) {
@@ -776,7 +811,12 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
     [snapshot, grid]
   );
   const metrics = metricsFor(snapshot, policy.id);
-  const currentHour = Math.floor(clamp(clockMinute, 0, DAY_MINUTES - 1) / 60);
+  const currentHourFloat = clamp(clockMinute, 0, DAY_MINUTES - 0.001) / 60;
+  const currentHour = Math.floor(currentHourFloat);
+  const roadDisplayScale = useMemo(
+    () => roadDisplayCongestionScale(network, currentHourFloat, trafficPressureByCell, grid),
+    [network, currentHourFloat, trafficPressureByCell, grid]
+  );
   const layers = useMemo(() => {
     const roads = network
       ? new GeoJsonLayer({
@@ -787,17 +827,21 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
           lineWidthMinPixels: 0.85,
           lineWidthMaxPixels: 3.65,
           getLineWidth: f => {
-            const congestion = roadCongestionForFeature(f, currentHour, trafficPressureByCell, grid);
-            return 0.7 + clamp((congestion - 1) / 3.4, 0, 1) * 2.75;
+            const congestion = roadCongestionForFeature(f, currentHourFloat, trafficPressureByCell, grid);
+            return 0.7 + clamp((congestion - roadDisplayScale.lo) / Math.max(0.22, roadDisplayScale.hi - roadDisplayScale.lo), 0, 1) * 2.75;
           },
-          getLineColor: f => trafficColor(roadCongestionForFeature(f, currentHour, trafficPressureByCell, grid)),
+          getLineColor: f =>
+            trafficColorForDisplay(
+              roadCongestionForFeature(f, currentHourFloat, trafficPressureByCell, grid),
+              roadDisplayScale
+            ),
           lineCapRounded: true,
           lineJointRounded: true,
           parameters: {depthTest: false},
           pickable: true,
           updateTriggers: {
-            getLineWidth: [currentHour, trafficPressureByCell, grid],
-            getLineColor: [currentHour, trafficPressureByCell, grid]
+            getLineWidth: [currentHourFloat, trafficPressureByCell, grid, roadDisplayScale],
+            getLineColor: [currentHourFloat, trafficPressureByCell, grid, roadDisplayScale]
           }
         })
       : null;
@@ -923,7 +967,7 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
         })
       : null;
     return [carGrid, peopleGrid, roads, surgeArea, routeCasing, routes, people, carLayer, surgeCore].filter(Boolean);
-  }, [network, grid, carGridData, peopleGridData, policy, snapshot, routeIndex, clockMinute, stepMinutes, cars, currentHour, event, trafficPressureByCell]);
+  }, [network, grid, carGridData, peopleGridData, policy, snapshot, routeIndex, clockMinute, stepMinutes, cars, currentHourFloat, event, trafficPressureByCell, roadDisplayScale]);
 
   return (
     <section style={{position: "relative", height, minHeight: height, overflow: "hidden"}}>
@@ -955,8 +999,8 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
           }
           if (layer.id.endsWith("-roads")) {
             const p = object.properties ?? {};
-            const congestion = roadCongestionForFeature(object, currentHour, trafficPressureByCell, grid);
-            return {text: `${p.name ?? "road"}\ntraffic: ${congestion.toFixed(2)}x\nhour: ${currentHour}:00`};
+            const congestion = roadCongestionForFeature(object, currentHourFloat, trafficPressureByCell, grid);
+            return {text: `${p.name ?? "road"}\ntraffic: ${congestion.toFixed(2)}x\nhour: ${formatClock(clockMinute).slice(0, 2)}:${formatClock(clockMinute).slice(3, 5)}`};
           }
           return null;
         }}
