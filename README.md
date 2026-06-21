@@ -30,8 +30,8 @@ Open the local URL printed by Vite. The npm script starts at `http://127.0.0.1:5
 Pages:
 
 - `/`: existing greedy dispatch map.
-- `/rl.html`: RL/value-aware orchestrator map using the precomputed RL feed.
-- `/compare.html`: greedy and RL maps side by side with one shared Start/Pause/Reset control.
+- `/rl.html`: Agentic Fleet map using the precomputed policy feed.
+- `/compare.html`: greedy and Agentic Fleet maps side by side with one shared Start/Pause/Reset control.
 
 The MapTiler key currently lives at the top of `main.jsx` as `MAPTILER_KEY`. Replace it there if the basemap ever stops loading.
 
@@ -60,7 +60,7 @@ python3 export_mobility_world.py --fleet-size 40 --step-minutes 5 --seed 7
 
 The export is intentionally scaled for the demo so route overlays stay readable. Dijkstra route geometry is deduplicated into a shared route table to keep the checked-in demo file manageable.
 
-Precompute the RL/value-aware comparison feed, including the same three event timelines used by the greedy page:
+Precompute the Agentic Fleet comparison feed, including the same three event timelines used by the greedy page:
 
 ```bash
 python3 precompute_orchestrator_world.py --include-events
@@ -71,7 +71,7 @@ This writes `public/data/mobility_orchestrator_world.json`, using the existing g
 Current base comparison feed:
 
 - greedy: `240` completed trips, `$8,622.26` profit, `73.19%` served, `5.51m` average wait;
-- RL/value-aware orchestrator: `291` completed trips, `$10,699.16` profit, `88.55%` served, `4.57m` average wait;
+- Agentic Fleet: `291` completed trips, `$10,699.16` profit, `88.55%` served, `4.57m` average wait;
 - delta: `+51` completed trips, `+$2,076.90` profit, `+15.36pp` served demand, `-0.94m` average wait.
 
 Current event comparison deltas:

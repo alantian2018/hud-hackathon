@@ -1949,7 +1949,7 @@ function App() {
         </button>
 
         <a href="/rl.html" style={{...controlButtonStyle, textDecoration: "none"}}>
-          RL Page
+          Agentic Fleet
         </a>
 
         <a href="/compare.html" style={{...controlButtonStyle, textDecoration: "none"}}>

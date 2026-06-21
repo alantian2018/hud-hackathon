@@ -28,7 +28,7 @@ const GREEDY = {
 };
 const RL = {
   id: "rl",
-  label: "RL Orchestrator",
+  label: "Agentic Fleet",
   route: [66, 133, 244, 245],
   casing: [232, 240, 254, 235],
   reposition: [20, 184, 166, 230],
@@ -47,26 +47,6 @@ const PEOPLE_GRID_EMPTY_LINE = [138, 180, 248, 34];
 const PEOPLE_GRID_BOTH_FILL = [168, 85, 247, 155];
 const PEOPLE_GRID_BOTH_LINE = [216, 180, 254, 230];
 const FEATURE_GRID_CELLS_CACHE = new WeakMap();
-const SCENARIO_DETAILS = {
-  chase_center_exit: {
-    scenario: "Chase Center Exit",
-    stressType: "Stadium demand surge",
-    failureMode: "Overconcentration near venue",
-    agentChallenge: "Stage vehicles around lower-traffic pickup corridors"
-  },
-  market_st_surge: {
-    scenario: "Market St Surge",
-    stressType: "Downtown demand spike",
-    failureMode: "Cars chase central demand and clog traffic",
-    agentChallenge: "Balance coverage across surrounding zones"
-  },
-  fidi_conference: {
-    scenario: "FiDi Conference",
-    stressType: "Business district exit wave",
-    failureMode: "Undersupply at nearby pickup zones",
-    agentChallenge: "Reposition before requests expire"
-  }
-};
 
 function buildStyleUrl() {
   return `https://api.maptiler.com/maps/streets-v2-dark/style.json?key=${MAPTILER_KEY}`;
@@ -779,16 +759,6 @@ function eventChoices(greedyWorld, rlWorld) {
     }));
 }
 
-function scenarioDetailsFor(event) {
-  if (!event) return null;
-  return SCENARIO_DETAILS[event.id] ?? {
-    scenario: event.label,
-    stressType: event.description ?? "Event demand stress test",
-    failureMode: "Baseline dispatch may overfit visible demand",
-    agentChallenge: "Maintain coverage while preserving low wait time"
-  };
-}
-
 function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, clockMinute, stepMinutes, viewState, setViewState, height, event}) {
   const cars = useMemo(
     () => animatedCars(snapshot, routeIndex, clockMinute, stepMinutes),
@@ -1124,6 +1094,92 @@ function Delta({label, value, good, money, suffix = ""}) {
   );
 }
 
+function formatSignedInteger(value) {
+  const numeric = Number(value) || 0;
+  const sign = numeric > 0 ? "+" : numeric < 0 ? "-" : "";
+  return `${sign}${Math.abs(Math.round(numeric)).toLocaleString()}`;
+}
+
+function formatSignedDollars(value) {
+  const numeric = Number(value) || 0;
+  const sign = numeric > 0 ? "+" : numeric < 0 ? "-" : "";
+  return `${sign}$${Math.floor(Math.abs(numeric)).toLocaleString()}`;
+}
+
+function formatSignedDecimal(value, digits = 1) {
+  const numeric = Number(value) || 0;
+  const sign = numeric > 0 ? "+" : numeric < 0 ? "-" : "";
+  return `${sign}${Math.abs(numeric).toFixed(digits)}`;
+}
+
+function BusinessImpactOverlay({greedySnapshot, rlSnapshot, visible}) {
+  if (!visible) return null;
+  const greedy = metricsFor(greedySnapshot, "greedy");
+  const rl = metricsFor(rlSnapshot, "rl");
+  const rows = [
+    {
+      value: formatSignedInteger(Number(rl.completed_trips ?? 0) - Number(greedy.completed_trips ?? 0)),
+      label: "completed trips"
+    },
+    {
+      value: formatSignedDollars(Number(rl.revenue ?? 0) - Number(greedy.revenue ?? 0)),
+      label: "revenue"
+    },
+    {
+      value: formatSignedDecimal(Number(rl.demand_served_pct ?? 0) - Number(greedy.demand_served_pct ?? 0), 1),
+      label: "percentage points demand served"
+    },
+    {
+      value: formatSignedDecimal(avgWaitMinutes(rl) - avgWaitMinutes(greedy), 1),
+      label: "minutes average wait"
+    }
+  ];
+
+  return (
+    <div style={{
+      position: "absolute",
+      left: "50%",
+      bottom: 24,
+      transform: "translateX(-50%)",
+      width: "min(620px, calc(100vw - 36px))",
+      padding: 16,
+      borderRadius: 8,
+      background: "rgba(3,7,18,0.92)",
+      border: "1px solid rgba(45,212,191,0.34)",
+      color: "white",
+      fontFamily: "system-ui, sans-serif",
+      boxShadow: "0 22px 60px rgba(0,0,0,0.46)",
+      pointerEvents: "none",
+      zIndex: 20
+    }}>
+      <div style={{fontSize: 12, opacity: 0.62, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0}}>
+        Business Impact
+      </div>
+      <div style={{display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, marginTop: 10}}>
+        {rows.map(row => (
+          <div
+            key={row.label}
+            style={{
+              minWidth: 0,
+              padding: "10px 11px",
+              borderRadius: 7,
+              background: "rgba(15,23,42,0.76)",
+              border: "1px solid rgba(148,163,184,0.16)"
+            }}
+          >
+            <div style={{fontSize: 22, lineHeight: 1, fontWeight: 900, color: row.value.startsWith("-") ? "#99f6e4" : "#bae6fd"}}>
+              {row.value}
+            </div>
+            <div style={{fontSize: 12, opacity: 0.74, marginTop: 5, fontWeight: 700}}>
+              {row.label}
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function useComparisonData() {
   const [state, setState] = useState({status: "loading"});
   useEffect(() => {
@@ -1166,10 +1222,7 @@ function ControlBar({
   events,
   activeEventId,
   onEventChange,
-  baseDemandRequests,
-  activeEvent,
-  scenarioCardOpen,
-  onToggleScenarioCard
+  baseDemandRequests
 }) {
   return (
     <header style={{
@@ -1186,8 +1239,8 @@ function ControlBar({
       fontFamily: "system-ui, sans-serif"
     }}>
       <div style={{display: "flex", flexDirection: "column", gap: 4}}>
-        <div style={{fontSize: 12, opacity: 0.66}}>{compare ? "Synchronized comparison" : "RL policy page"}</div>
-        <div style={{fontSize: 20, fontWeight: 850}}>{compare ? "Greedy vs RL Fleet Dispatch" : "RL Fleet Orchestrator"}</div>
+        <div style={{fontSize: 12, opacity: 0.66}}>{compare ? "Synchronized comparison" : "Agentic Fleet page"}</div>
+        <div style={{fontSize: 20, fontWeight: 850}}>{compare ? "Greedy vs Agentic Fleet" : "Agentic Fleet"}</div>
         {compare && (
           <div style={{fontSize: 12, opacity: 0.68}}>
             Base demand: {Number(baseDemandRequests ?? 0).toLocaleString()} requests, same stream for both policies
@@ -1203,7 +1256,7 @@ function ControlBar({
       <div style={{display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8}}>
         <div style={{display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end"}}>
           <a href="/" style={navButtonStyle}>Greedy Page</a>
-          <a href="/rl.html" style={navButtonStyle}>RL Page</a>
+          <a href="/rl.html" style={navButtonStyle}>Agentic Fleet</a>
           <a href="/compare.html" style={navButtonStyle}>Compare</a>
           <span style={{padding: "8px 10px", border: "1px solid rgba(148,163,184,0.32)", borderRadius: 7, minWidth: 60, textAlign: "center"}}>
             {clockLabel}
@@ -1240,13 +1293,6 @@ function ControlBar({
                 </button>
               );
             })}
-            {compare && activeEvent && (
-              <ScenarioCard
-                details={scenarioDetailsFor(activeEvent)}
-                open={scenarioCardOpen}
-                onToggle={onToggleScenarioCard}
-              />
-            )}
           </div>
         )}
         <TrafficLegend />
@@ -1255,66 +1301,6 @@ function ControlBar({
   );
 }
 
-function ScenarioCard({details, open, onToggle}) {
-  return (
-    <div style={{display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end"}}>
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-expanded={open}
-        style={{
-          display: "flex",
-          alignItems: "center",
-          gap: 7,
-          padding: "7px 9px",
-          borderRadius: 7,
-          border: "1px solid rgba(125,211,252,0.24)",
-          background: "rgba(15,23,42,0.72)",
-          color: "white",
-          cursor: "pointer",
-          fontSize: 12,
-          fontWeight: 800
-        }}
-      >
-        <span style={{opacity: 0.62}}>Scenario</span>
-        <span style={{color: "#bae6fd"}}>{details.scenario}</span>
-        <span style={{opacity: 0.7}}>{open ? "Hide" : "Details"}</span>
-      </button>
-      {open && (
-        <>
-          <ScenarioField label="Stress" value={details.stressType} />
-          <ScenarioField label="Failure" value={details.failureMode} />
-          <ScenarioField label="Challenge" value={details.agentChallenge} />
-        </>
-      )}
-    </div>
-  );
-}
-
-function ScenarioField({label, value}) {
-  return (
-    <span style={{
-      display: "inline-flex",
-      alignItems: "center",
-      gap: 5,
-      maxWidth: 245,
-      padding: "6px 8px",
-      borderRadius: 7,
-      border: "1px solid rgba(148,163,184,0.18)",
-      background: "rgba(15,23,42,0.54)",
-      color: "rgba(255,255,255,0.82)",
-      fontSize: 12,
-      lineHeight: 1.15
-    }}>
-      <span style={{color: "rgba(203,213,225,0.58)", fontWeight: 850}}>
-        {label}
-      </span>
-      <span style={{fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"}}>
-        {value}
-      </span>
-    </span>
-  );
-}
 const buttonStyle = {
   padding: "9px 11px",
   border: "1px solid rgba(148,163,184,0.34)",
@@ -1352,7 +1338,6 @@ function ComparisonShell({compare}) {
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = useState(0.5);
   const [activeEventId, setActiveEventId] = useState(null);
-  const [scenarioCardOpen, setScenarioCardOpen] = useState(false);
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
 
   const events = useMemo(
@@ -1411,6 +1396,9 @@ function ComparisonShell({compare}) {
 
   const greedySnapshot = snapshotAt(greedySnapshots, clockMinute);
   const rlSnapshot = snapshotAt(rlSnapshots, clockMinute);
+  const finalGreedySnapshot = greedySnapshots.at(-1);
+  const finalRlSnapshot = rlSnapshots.at(-1);
+  const showBusinessImpact = compare && clockMinute >= endMinute - 0.01;
   const onStart = () => {
     if (clockMinute >= endMinute - 0.01) setClockMinute(PRE_FRAME_MINUTE);
     setRunning(true);
@@ -1421,13 +1409,12 @@ function ComparisonShell({compare}) {
   };
   const onEventChange = nextEventId => {
     setActiveEventId(nextEventId);
-    setScenarioCardOpen(false);
     setClockMinute(PRE_FRAME_MINUTE);
     setRunning(false);
   };
 
   return (
-    <main style={{width: "100vw", height: "100vh", overflow: "hidden", background: "#04080e", display: "grid", gridTemplateRows: "auto minmax(0,1fr)"}}>
+    <main style={{width: "100vw", height: "100vh", overflow: "hidden", background: "#04080e", display: "grid", gridTemplateRows: "auto minmax(0,1fr)", position: "relative"}}>
       <ControlBar
         running={running}
         onStart={onStart}
@@ -1443,9 +1430,6 @@ function ComparisonShell({compare}) {
         activeEventId={activeEventId}
         onEventChange={onEventChange}
         baseDemandRequests={baseDemandRequests}
-        activeEvent={activeEvent}
-        scenarioCardOpen={scenarioCardOpen}
-        onToggleScenarioCard={() => setScenarioCardOpen(open => !open)}
       />
       {compare ? (
         <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", height: mapHeight, minHeight: 0}}>
@@ -1497,6 +1481,11 @@ function ComparisonShell({compare}) {
           event={activeEvent}
         />
       )}
+      <BusinessImpactOverlay
+        greedySnapshot={finalGreedySnapshot}
+        rlSnapshot={finalRlSnapshot}
+        visible={showBusinessImpact}
+      />
     </main>
   );
 }
