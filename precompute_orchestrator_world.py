@@ -81,6 +81,7 @@ class OrchestratorMapDispatch(StatefulMapDispatch):
         trip_weight: float = 0.05,
         assignment_bonus: float = 120.0,
         max_repositions_per_tick: int = 1,
+        max_queued_per_tick: int = 0,
         min_reposition_stall: int = 6,
         min_reposition_distance_m: float = 1200.0,
         **kwargs,
@@ -95,6 +96,7 @@ class OrchestratorMapDispatch(StatefulMapDispatch):
         self.trip_weight = float(trip_weight)
         self.assignment_bonus = float(assignment_bonus)
         self.max_repositions_per_tick = int(max_repositions_per_tick)
+        self.max_queued_per_tick = int(max_queued_per_tick)
         self.min_reposition_stall = int(min_reposition_stall)
         self.min_reposition_distance_m = float(min_reposition_distance_m)
         self.reposition_cost = 0.0
@@ -106,7 +108,11 @@ class OrchestratorMapDispatch(StatefulMapDispatch):
         self._expire_requests(timestep)
         self.add_requests(people, timestep)
         new_assignments = self._assign_waiting(timestep, event, source_summary or {})
-        new_queued_assignments = self._queue_next_assignments(timestep, event, source_summary or {})
+        new_queued_assignments = (
+            self._queue_next_assignments(timestep, event, source_summary or {})
+            if self.max_queued_per_tick > 0
+            else []
+        )
         new_repositions = self._reposition_idle(timestep, event, source_summary or {})
 
         active_assignments = []
@@ -364,7 +370,9 @@ class OrchestratorMapDispatch(StatefulMapDispatch):
 
         demand_by_cell = demand_lookup(source_summary or {})
         queued = []
-        max_new = min(len(waiting), max(1, len(self.cars) // 4))
+        max_new = min(len(waiting), self.max_queued_per_tick)
+        if max_new <= 0:
+            return []
         used_cars: set[str] = set()
         ordered_waiting = sorted(
             waiting,
@@ -607,6 +615,7 @@ def build_orchestrator_snapshots(
         trip_weight=policy_args.trip_weight,
         assignment_bonus=policy_args.assignment_bonus,
         max_repositions_per_tick=policy_args.max_repositions_per_tick,
+        max_queued_per_tick=policy_args.max_queued_per_tick,
         min_reposition_stall=policy_args.min_reposition_stall,
         min_reposition_distance_m=policy_args.min_reposition_distance_m,
     )
@@ -651,7 +660,7 @@ def build_world(args: argparse.Namespace) -> dict[str, Any]:
     fleet_size = int(source.get("fleet_size", args.fleet_size))
     step_minutes = int(source.get("step_minutes", args.step_minutes))
 
-    print("Building base orchestrator comparison snapshots...")
+    print("Building base orchestrator comparison snapshots...", flush=True)
     snapshots = build_orchestrator_snapshots(
         source.get("snapshots", []),
         graph,
@@ -671,7 +680,7 @@ def build_world(args: argparse.Namespace) -> dict[str, Any]:
         for event_id, scenario in source.get("event_scenarios", {}).items():
             event = event_by_id.get(event_id)
             scenario_step = int(scenario.get("step_minutes", step_minutes))
-            print(f"Building event orchestrator comparison snapshots: {event_id}...")
+            print(f"Building event orchestrator comparison snapshots: {event_id}...", flush=True)
             event_scenarios[event_id] = {
                 "step_minutes": scenario_step,
                 "snapshots": build_orchestrator_snapshots(
@@ -713,16 +722,17 @@ def main() -> None:
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--fleet-size", type=int, default=40)
     parser.add_argument("--step-minutes", type=int, default=5)
-    parser.add_argument("--candidate-limit", type=int, default=5)
-    parser.add_argument("--beam-width", type=int, default=96)
+    parser.add_argument("--candidate-limit", type=int, default=2)
+    parser.add_argument("--beam-width", type=int, default=64)
     parser.add_argument("--value-weight", type=float, default=1.35)
-    parser.add_argument("--urgency-weight", type=float, default=12.0)
+    parser.add_argument("--urgency-weight", type=float, default=10.0)
     parser.add_argument("--pressure-weight", type=float, default=10.0)
     parser.add_argument("--stall-weight", type=float, default=0.18)
-    parser.add_argument("--pickup-weight", type=float, default=2.35)
+    parser.add_argument("--pickup-weight", type=float, default=6.2)
     parser.add_argument("--trip-weight", type=float, default=0.05)
-    parser.add_argument("--assignment-bonus", type=float, default=120.0)
+    parser.add_argument("--assignment-bonus", type=float, default=90.0)
     parser.add_argument("--max-repositions-per-tick", type=int, default=1)
+    parser.add_argument("--max-queued-per-tick", type=int, default=0)
     parser.add_argument("--min-reposition-stall", type=int, default=6)
     parser.add_argument("--min-reposition-distance-m", type=float, default=1200.0)
     parser.add_argument("--include-events", action="store_true")

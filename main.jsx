@@ -1087,7 +1087,7 @@ function snapshotWaitTimeMinutes(snapshot) {
 
 function App() {
   const [clockMinute, setClockMinute] = useState(SIM_START_MINUTE);
-  const [simSpeed, setSimSpeed] = useState(0.1);
+  const [simSpeed, setSimSpeed] = useState(0.5);
   const [paused, setPaused] = useState(false);
   const [keyMissing, setKeyMissing] = useState(MAPTILER_KEY === "YOUR_MAPTILER_KEY");
   const [network, setNetwork] = useState(null);
@@ -1599,8 +1599,8 @@ function App() {
       autoHighlight: true,
       highlightColor: [255, 255, 255, 70],
       lineWidthMinPixels: 2,
-      getFillColor: [250, 204, 21, 44],
-      getLineColor: [250, 204, 21, 220],
+      getFillColor: [239, 68, 68, 46],
+      getLineColor: [248, 113, 113, 245],
       getTooltip: ({object}) => {
         if (!object) return null;
         return {

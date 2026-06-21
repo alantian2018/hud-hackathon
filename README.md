@@ -40,8 +40,8 @@ The MapTiler key currently lives at the top of `main.jsx` as `MAPTILER_KEY`. Rep
 - `Cars Grid`: shows vehicle occupancy by grid cell.
 - `People Grid`: shows pickup cells in blue and destination cells in red.
 - `Greedy`: enables the stateful greedy dispatch simulation.
-- `Speed`: cycles simulated playback speed through `0.1x`, `0.5x`, and faster demo speeds.
-- `Events`: toggles one of three preplanned demand surges: Chase Center exit, Market St surge, or FiDi conference surge. Each event generates more people near that location, which then changes traffic pressure, greedy routes, and stats.
+- `Speed`: starts at `0.5x` and cycles through slower/faster demo speeds.
+- `Events`: toggles one of three preplanned demand surges: Chase Center exit, Market St surge, or FiDi conference surge. Each event is marked with a red surge circle and generates more people near that location, changing traffic pressure, routes, and stats.
 - Time presets jump the simulation to morning, midday, evening rush, or night.
 
 ## Regenerate Simulation Data
@@ -60,19 +60,25 @@ python3 export_mobility_world.py --fleet-size 40 --step-minutes 5 --seed 7
 
 The export is intentionally scaled for the demo so route overlays stay readable. Dijkstra route geometry is deduplicated into a shared route table to keep the checked-in demo file manageable.
 
-Precompute the RL/value-aware comparison feed:
+Precompute the RL/value-aware comparison feed, including the same three event timelines used by the greedy page:
 
 ```bash
-python3 precompute_orchestrator_world.py
+python3 precompute_orchestrator_world.py --include-events
 ```
 
-This writes `public/data/mobility_orchestrator_world.json`, using the existing greedy export as the shared request/timeline source. Add `--include-events` when you want to precompute the event timelines too; the default builds the base 24-hour comparison feed quickly.
+This writes `public/data/mobility_orchestrator_world.json`, using the existing greedy export as the shared request/timeline source. Omit `--include-events` when you only want to rebuild the base 24-hour comparison feed quickly.
 
 Current base comparison feed:
 
-- greedy: `240` completed trips, `$8,622.26` revenue, `73.19%` served, `89` cancellations;
-- RL/value-aware orchestrator: `291` completed trips, `$10,699.16` revenue, `88.55%` served, `38` cancellations;
-- delta: `+51` completed trips, `+$2,076.90` revenue, `+15.36pp` served demand, `-51` cancellations.
+- greedy: `240` completed trips, `$8,622.26` revenue, `73.19%` served, `5.51m` average wait;
+- RL/value-aware orchestrator: `291` completed trips, `$10,699.16` revenue, `88.55%` served, `4.57m` average wait;
+- delta: `+51` completed trips, `+$2,076.90` revenue, `+15.36pp` served demand, `-0.94m` average wait.
+
+Current event comparison deltas:
+
+- Chase Center exit: `+127` completed trips, `+$6,903.50` revenue, `+12.50pp` served demand, `-3.21m` average wait.
+- Market St surge: `+185` completed trips, `+$8,640.02` revenue, `+22.48pp` served demand, `-7.75m` average wait.
+- FiDi conference: `+171` completed trips, `+$8,165.09` revenue, `+20.09pp` served demand, `-5.72m` average wait.
 
 ## Rebuild OSMnx Road Data
 
@@ -92,7 +98,7 @@ python3 export_mobility_world.py
 python3 -B -m unittest test_generators.py
 python3 -B -m unittest test_hud_mobility.py
 python3 -m hud_mobility.eval_local --episodes 8 --horizon-steps 8 --fleet-size 20
-python3 precompute_orchestrator_world.py
+python3 precompute_orchestrator_world.py --include-events
 ./node_modules/.bin/vite build --outDir /private/tmp/hud-hackathon-build
 ```
 

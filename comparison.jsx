@@ -7,7 +7,8 @@ import "mapbox-gl/dist/mapbox-gl.css";
 
 const MAPTILER_KEY = "4WonZ3glTzG3MWfQd6gQ";
 const DAY_MINUTES = 24 * 60;
-const SPEEDS = [1, 4, 12, 30, 60];
+const PRE_FRAME_MINUTE = -1;
+const SPEEDS = [0.5, 1, 4, 12, 30, 60];
 const INITIAL_VIEW_STATE = {
   longitude: -122.4194,
   latitude: 37.7749,
@@ -59,6 +60,7 @@ function clamp(v, min, max) {
 }
 
 function formatClock(minute) {
+  if (minute < 0) return "00:00";
   const wrapped = clamp(minute, 0, DAY_MINUTES - 0.001);
   const hour = Math.floor(wrapped / 60);
   const min = Math.floor(wrapped % 60);
@@ -87,12 +89,89 @@ async function fetchJson(paths) {
   throw lastError;
 }
 
-function scenarioSnapshots(world, scenarioId) {
+function zeroStats() {
+  return {
+    completed_trips: 0,
+    revenue: 0,
+    demand_served_pct: 0,
+    wait_time_min: 0,
+    fleet_utilization_pct: 0,
+    avg_fleet_utilization_pct: 0,
+    active_cars: 0,
+    repositioning_cars: 0,
+    stalled_cars: 0,
+    unassigned_people: 0,
+    canceled_requests: 0,
+    total_requests: 0,
+    reposition_cost: 0
+  };
+}
+
+function zeroDispatchSummary() {
+  return {
+    num_assignments: 0,
+    num_new_assignments: 0,
+    num_queued_assignments: 0,
+    num_new_queued_assignments: 0,
+    num_repositions: 0,
+    num_new_repositions: 0,
+    num_unassigned_people: 0,
+    num_stalled_cars: 0,
+    num_active_cars: 0
+  };
+}
+
+function zeroPreFrame(snapshot, policyId) {
+  const statsKey = policyId === "greedy" ? "map_greedy_stats" : "map_orchestrator_stats";
+  const cars = (snapshot?.map_dispatch?.cars ?? []).map(car => ({
+    ...car,
+    status: "idle",
+    assigned_person_id: null,
+    pickup_node_id: null,
+    dropoff_node_id: null,
+    route_elapsed: 0
+  }));
+  const stats = zeroStats();
+  const dispatchSummary = zeroDispatchSummary();
+  return {
+    ...(snapshot ?? {}),
+    timestep: PRE_FRAME_MINUTE,
+    is_pre_frame: true,
+    new_people: [],
+    summary: {
+      ...(snapshot?.summary ?? {}),
+      num_new_people: 0,
+      top_demand_cells: [],
+      traffic_bottlenecks: [],
+      dispatch: dispatchSummary,
+      greedy_stats: stats,
+      orchestrator_stats: stats
+    },
+    map_dispatch: {
+      ...(snapshot?.map_dispatch ?? {}),
+      assignments: [],
+      new_assignments: [],
+      queued_assignments: [],
+      new_queued_assignments: [],
+      repositions: [],
+      new_repositions: [],
+      cars,
+      summary: dispatchSummary
+    },
+    map_people: [],
+    [statsKey]: stats
+  };
+}
+
+function scenarioSnapshots(world, scenarioId, policyId) {
   if (!world) return [];
+  let snapshots = world.snapshots ?? [];
   if (scenarioId && world.event_scenarios?.[scenarioId]?.snapshots?.length) {
-    return world.event_scenarios[scenarioId].snapshots;
+    snapshots = world.event_scenarios[scenarioId].snapshots;
   }
-  return world.snapshots ?? [];
+  if (!snapshots.length) return [];
+  if (snapshots[0]?.is_pre_frame) return snapshots;
+  return [zeroPreFrame(snapshots[0], policyId), ...snapshots];
 }
 
 function scenarioStepMinutes(world, scenarioId) {
@@ -260,6 +339,42 @@ function makePeopleFeatures(snapshot) {
   return {type: "FeatureCollection", features};
 }
 
+function circlePolygon(center, radiusM, steps = 96) {
+  if (!Array.isArray(center) || center.length < 2) return [];
+  const [lon, lat] = center.map(Number);
+  const latRadians = lat * Math.PI / 180;
+  const metersPerDegreeLon = Math.max(1, 111320 * Math.cos(latRadians));
+  const dLat = Number(radiusM || 1000) / 111320;
+  const dLon = Number(radiusM || 1000) / metersPerDegreeLon;
+  const coordinates = [];
+  for (let i = 0; i <= steps; i++) {
+    const angle = (i / steps) * Math.PI * 2;
+    coordinates.push([lon + Math.cos(angle) * dLon, lat + Math.sin(angle) * dLat]);
+  }
+  return coordinates;
+}
+
+function makeEventFeatureCollection(event) {
+  if (!event?.center) return {type: "FeatureCollection", features: []};
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [circlePolygon(event.center, event.radius_m ?? 1000)]
+        },
+        properties: {
+          id: event.id,
+          label: event.label,
+          description: event.description
+        }
+      }
+    ]
+  };
+}
+
 function trafficColor(value) {
   if (value < 1.35) return [52, 168, 83, 185];
   if (value < 1.9) return [251, 188, 4, 190];
@@ -272,6 +387,12 @@ function metricsFor(snapshot, policyId) {
   return raw ?? {};
 }
 
+function avgWaitMinutes(stats) {
+  const completed = Number(stats?.completed_trips ?? 0);
+  const servedByPct = Number(stats?.total_requests ?? 0) * Number(stats?.demand_served_pct ?? 0) / 100;
+  return Number(stats?.wait_time_min ?? 0) / Math.max(1, completed, servedByPct);
+}
+
 function metricDelta(rl, greedy, key, lowerIsBetter = false) {
   const a = Number(rl?.[key] ?? 0);
   const b = Number(greedy?.[key] ?? 0);
@@ -280,7 +401,22 @@ function metricDelta(rl, greedy, key, lowerIsBetter = false) {
   return {delta, good};
 }
 
-function MapPanel({policy, world, network, snapshot, routeIndex, clockMinute, stepMinutes, viewState, setViewState, single}) {
+function eventChoices(greedyWorld, rlWorld) {
+  const greedyScenarioIds = new Set(Object.keys(greedyWorld?.event_scenarios ?? {}));
+  const rlScenarioIds = new Set(Object.keys(rlWorld?.event_scenarios ?? {}));
+  return (greedyWorld?.events ?? [])
+    .filter(event => greedyScenarioIds.has(event.id) && rlScenarioIds.has(event.id))
+    .map(event => ({
+      id: event.id,
+      label: event.label,
+      short_label: event.short_label ?? event.label,
+      description: event.description,
+      center: event.center,
+      radius_m: event.radius_m
+    }));
+}
+
+function MapPanel({policy, world, network, snapshot, routeIndex, clockMinute, stepMinutes, viewState, setViewState, height, event}) {
   const cars = useMemo(
     () => animatedCars(snapshot, routeIndex, clockMinute, stepMinutes),
     [snapshot, routeIndex, clockMinute, stepMinutes]
@@ -353,11 +489,38 @@ function MapPanel({policy, world, network, snapshot, routeIndex, clockMinute, st
       lineWidthMinPixels: 1.2,
       stroked: true
     });
-    return [roads, routeCasing, routes, people, carLayer].filter(Boolean);
-  }, [network, policy, snapshot, routeIndex, clockMinute, stepMinutes, cars, currentHour]);
+    const surgeArea = event
+      ? new GeoJsonLayer({
+          id: `${policy.id}-surge-area`,
+          data: makeEventFeatureCollection(event),
+          stroked: true,
+          filled: true,
+          lineWidthMinPixels: 3,
+          lineWidthMaxPixels: 6,
+          getFillColor: [239, 68, 68, 46],
+          getLineColor: [248, 113, 113, 245],
+          pickable: true
+        })
+      : null;
+    const surgeCore = event
+      ? new ScatterplotLayer({
+          id: `${policy.id}-surge-core`,
+          data: [event],
+          radiusUnits: "meters",
+          getRadius: d => Math.max(90, Number(d.radius_m ?? 1000) * 0.09),
+          getPosition: d => d.center,
+          getFillColor: [239, 68, 68, 190],
+          getLineColor: [254, 226, 226, 245],
+          lineWidthMinPixels: 2,
+          stroked: true,
+          pickable: false
+        })
+      : null;
+    return [roads, surgeArea, routeCasing, routes, people, carLayer, surgeCore].filter(Boolean);
+  }, [network, policy, snapshot, routeIndex, clockMinute, stepMinutes, cars, currentHour, event]);
 
   return (
-    <section style={{position: "relative", minHeight: single ? "100vh" : "calc(100vh - 82px)", overflow: "hidden"}}>
+    <section style={{position: "relative", height, minHeight: height, overflow: "hidden"}}>
       <DeckGL
         viewState={viewState}
         onViewStateChange={({viewState: next}) => setViewState(next)}
@@ -411,7 +574,7 @@ function MapPanel({policy, world, network, snapshot, routeIndex, clockMinute, st
           <Metric label="Trips" value={Number(metrics.completed_trips ?? 0).toLocaleString()} />
           <Metric label="Revenue" value={formatMoney(metrics.revenue)} />
           <Metric label="Demand" value={formatPct(metrics.demand_served_pct)} />
-          <Metric label="Wait" value={`${Number(metrics.wait_time_min ?? 0).toFixed(1)}m`} />
+          <Metric label="Avg Wait" value={`${avgWaitMinutes(metrics).toFixed(1)}m`} />
           <Metric label="Util." value={formatPct(metrics.avg_fleet_utilization_pct ?? metrics.fleet_utilization_pct)} />
           <Metric label="Active" value={Number(metrics.active_cars ?? 0).toLocaleString()} />
         </div>
@@ -439,12 +602,17 @@ function DeltaBar({greedySnapshot, rlSnapshot}) {
   const rl = metricsFor(rlSnapshot, "rl");
   const trips = metricDelta(rl, greedy, "completed_trips");
   const revenue = metricDelta(rl, greedy, "revenue");
-  const wait = metricDelta(rl, greedy, "wait_time_min", true);
+  const demand = metricDelta(rl, greedy, "demand_served_pct");
+  const avgWait = {
+    delta: avgWaitMinutes(rl) - avgWaitMinutes(greedy),
+    good: avgWaitMinutes(rl) < avgWaitMinutes(greedy)
+  };
   return (
     <div style={{display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13}}>
       <Delta label="Trips" value={trips.delta} good={trips.good} />
       <Delta label="Revenue" value={revenue.delta} good={revenue.good} money />
-      <Delta label="Wait" value={wait.delta} good={wait.good} suffix="m" />
+      <Delta label="Demand" value={demand.delta} good={demand.good} suffix="pp" />
+      <Delta label="Avg Wait" value={avgWait.delta} good={avgWait.good} suffix="m" />
     </div>
   );
 }
@@ -452,6 +620,7 @@ function DeltaBar({greedySnapshot, rlSnapshot}) {
 function Delta({label, value, good, money, suffix = ""}) {
   const sign = value > 0 ? "+" : "";
   const shown = money ? `${sign}${formatMoney(value).replace("$-", "-$")}` : `${sign}${value.toFixed(1)}${suffix}`;
+  const neutral = Math.abs(Number(value) || 0) < 0.001;
   return (
     <span style={{
       display: "inline-flex",
@@ -459,9 +628,9 @@ function Delta({label, value, good, money, suffix = ""}) {
       alignItems: "center",
       padding: "6px 8px",
       borderRadius: 999,
-      background: good ? "rgba(20,184,166,0.16)" : "rgba(248,113,113,0.15)",
-      color: good ? "#99f6e4" : "#fecaca",
-      border: good ? "1px solid rgba(45,212,191,0.32)" : "1px solid rgba(248,113,113,0.28)"
+      background: neutral ? "rgba(148,163,184,0.12)" : good ? "rgba(20,184,166,0.16)" : "rgba(248,113,113,0.15)",
+      color: neutral ? "#cbd5e1" : good ? "#99f6e4" : "#fecaca",
+      border: neutral ? "1px solid rgba(148,163,184,0.26)" : good ? "1px solid rgba(45,212,191,0.32)" : "1px solid rgba(248,113,113,0.28)"
     }}>
       <strong>{label}</strong> {shown}
     </span>
@@ -493,10 +662,24 @@ function useComparisonData() {
   return state;
 }
 
-function ControlBar({running, onStart, onPause, onReset, speed, setSpeed, clockLabel, greedySnapshot, rlSnapshot, compare}) {
+function ControlBar({
+  running,
+  onStart,
+  onPause,
+  onReset,
+  speed,
+  setSpeed,
+  clockLabel,
+  greedySnapshot,
+  rlSnapshot,
+  compare,
+  events,
+  activeEventId,
+  onEventChange
+}) {
   return (
     <header style={{
-      height: compare ? 82 : 76,
+      minHeight: compare ? 112 : 104,
       display: "flex",
       alignItems: "center",
       justifyContent: "space-between",
@@ -513,20 +696,48 @@ function ControlBar({running, onStart, onPause, onReset, speed, setSpeed, clockL
         <div style={{fontSize: 20, fontWeight: 850}}>{compare ? "Greedy vs RL Fleet Dispatch" : "RL Fleet Orchestrator"}</div>
         {compare && <DeltaBar greedySnapshot={greedySnapshot} rlSnapshot={rlSnapshot} />}
       </div>
-      <div style={{display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end"}}>
-        <a href="/" style={navButtonStyle}>Greedy Page</a>
-        <a href="/rl.html" style={navButtonStyle}>RL Page</a>
-        <a href="/compare.html" style={navButtonStyle}>Compare</a>
-        <span style={{padding: "8px 10px", border: "1px solid rgba(148,163,184,0.32)", borderRadius: 7, minWidth: 60, textAlign: "center"}}>
-          {clockLabel}
-        </span>
-        <button type="button" onClick={() => setSpeed(SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length])} style={buttonStyle}>
-          x{speed}
-        </button>
-        <button type="button" onClick={running ? onPause : onStart} style={{...buttonStyle, background: running ? "#facc15" : "#14b8a6", color: "#061016"}}>
-          {running ? "Pause" : compare ? "Start Both" : "Start"}
-        </button>
-        <button type="button" onClick={onReset} style={buttonStyle}>Reset</button>
+      <div style={{display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8}}>
+        <div style={{display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end"}}>
+          <a href="/" style={navButtonStyle}>Greedy Page</a>
+          <a href="/rl.html" style={navButtonStyle}>RL Page</a>
+          <a href="/compare.html" style={navButtonStyle}>Compare</a>
+          <span style={{padding: "8px 10px", border: "1px solid rgba(148,163,184,0.32)", borderRadius: 7, minWidth: 60, textAlign: "center"}}>
+            {clockLabel}
+          </span>
+          <button type="button" onClick={() => setSpeed(SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length])} style={buttonStyle}>
+            x{speed}
+          </button>
+          <button type="button" onClick={running ? onPause : onStart} style={{...buttonStyle, background: running ? "#facc15" : "#14b8a6", color: "#061016"}}>
+            {running ? "Pause" : compare ? "Start Both" : "Start"}
+          </button>
+          <button type="button" onClick={onReset} style={buttonStyle}>Reset</button>
+        </div>
+        {events.length > 0 && (
+          <div style={{display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end"}}>
+            <span style={{fontSize: 12, opacity: 0.62, fontWeight: 700}}>Events</span>
+            <button
+              type="button"
+              onClick={() => onEventChange(null)}
+              style={activeEventId ? eventButtonStyle : activeEventButtonStyle}
+            >
+              Base
+            </button>
+            {events.map(event => {
+              const active = activeEventId === event.id;
+              return (
+                <button
+                  key={event.id}
+                  type="button"
+                  title={event.description}
+                  onClick={() => onEventChange(event.id)}
+                  style={active ? activeEventButtonStyle : eventButtonStyle}
+                >
+                  {event.short_label}
+                </button>
+              );
+            })}
+          </div>
+        )}
       </div>
     </header>
   );
@@ -549,23 +760,44 @@ const navButtonStyle = {
   alignItems: "center"
 };
 
+const eventButtonStyle = {
+  ...buttonStyle,
+  padding: "7px 9px",
+  fontSize: 12,
+  background: "rgba(15,23,42,0.82)"
+};
+
+const activeEventButtonStyle = {
+  ...eventButtonStyle,
+  background: "#7dd3fc",
+  color: "#061016",
+  border: "1px solid rgba(255,255,255,0.65)"
+};
+
 function ComparisonShell({compare}) {
   const data = useComparisonData();
-  const [clockMinute, setClockMinute] = useState(0);
+  const [clockMinute, setClockMinute] = useState(PRE_FRAME_MINUTE);
   const [running, setRunning] = useState(false);
-  const [speed, setSpeed] = useState(12);
+  const [speed, setSpeed] = useState(0.5);
+  const [activeEventId, setActiveEventId] = useState(null);
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
 
+  const events = useMemo(
+    () => eventChoices(data.greedyWorld, data.rlWorld),
+    [data.greedyWorld, data.rlWorld]
+  );
+  const activeEvent = events.find(event => event.id === activeEventId) ?? null;
   const greedySnapshots = useMemo(
-    () => scenarioSnapshots(data.greedyWorld, null),
-    [data.greedyWorld]
+    () => scenarioSnapshots(data.greedyWorld, activeEventId, "greedy"),
+    [data.greedyWorld, activeEventId]
   );
   const rlSnapshots = useMemo(
-    () => scenarioSnapshots(data.rlWorld, null),
-    [data.rlWorld]
+    () => scenarioSnapshots(data.rlWorld, activeEventId, "rl"),
+    [data.rlWorld, activeEventId]
   );
-  const greedyStep = scenarioStepMinutes(data.greedyWorld, null);
-  const rlStep = scenarioStepMinutes(data.rlWorld, null);
+  const greedyStep = scenarioStepMinutes(data.greedyWorld, activeEventId);
+  const rlStep = scenarioStepMinutes(data.rlWorld, activeEventId);
+  const mapHeight = "100%";
   const endMinute = useMemo(() => {
     const greedyEnd = greedySnapshots.at(-1)?.timestep ?? DAY_MINUTES;
     const rlEnd = rlSnapshots.at(-1)?.timestep ?? DAY_MINUTES;
@@ -587,6 +819,11 @@ function ComparisonShell({compare}) {
     return () => clearInterval(timer);
   }, [running, speed, endMinute]);
 
+  useEffect(() => {
+    if (!activeEventId) return;
+    if (!events.some(event => event.id === activeEventId)) setActiveEventId(null);
+  }, [activeEventId, events]);
+
   if (data.status !== "ready") {
     return (
       <div style={{height: "100vh", display: "grid", placeItems: "center", background: "#04080e", color: "white", fontFamily: "system-ui, sans-serif"}}>
@@ -598,16 +835,21 @@ function ComparisonShell({compare}) {
   const greedySnapshot = snapshotAt(greedySnapshots, clockMinute);
   const rlSnapshot = snapshotAt(rlSnapshots, clockMinute);
   const onStart = () => {
-    if (clockMinute >= endMinute - 0.01) setClockMinute(0);
+    if (clockMinute >= endMinute - 0.01) setClockMinute(PRE_FRAME_MINUTE);
     setRunning(true);
   };
   const onReset = () => {
-    setClockMinute(0);
+    setClockMinute(PRE_FRAME_MINUTE);
+    setRunning(false);
+  };
+  const onEventChange = nextEventId => {
+    setActiveEventId(nextEventId);
+    setClockMinute(PRE_FRAME_MINUTE);
     setRunning(false);
   };
 
   return (
-    <main style={{width: "100vw", height: "100vh", overflow: "hidden", background: "#04080e"}}>
+    <main style={{width: "100vw", height: "100vh", overflow: "hidden", background: "#04080e", display: "grid", gridTemplateRows: "auto minmax(0,1fr)"}}>
       <ControlBar
         running={running}
         onStart={onStart}
@@ -619,9 +861,12 @@ function ComparisonShell({compare}) {
         greedySnapshot={greedySnapshot}
         rlSnapshot={rlSnapshot}
         compare={compare}
+        events={events}
+        activeEventId={activeEventId}
+        onEventChange={onEventChange}
       />
       {compare ? (
-        <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", height: "calc(100vh - 82px)"}}>
+        <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", height: mapHeight, minHeight: 0}}>
           <MapPanel
             policy={GREEDY}
             world={data.greedyWorld}
@@ -632,6 +877,8 @@ function ComparisonShell({compare}) {
             stepMinutes={greedyStep}
             viewState={viewState}
             setViewState={setViewState}
+            height={mapHeight}
+            event={activeEvent}
           />
           <MapPanel
             policy={RL}
@@ -643,6 +890,8 @@ function ComparisonShell({compare}) {
             stepMinutes={rlStep}
             viewState={viewState}
             setViewState={setViewState}
+            height={mapHeight}
+            event={activeEvent}
           />
         </div>
       ) : (
@@ -656,7 +905,8 @@ function ComparisonShell({compare}) {
           stepMinutes={rlStep}
           viewState={viewState}
           setViewState={setViewState}
-          single
+          height={mapHeight}
+          event={activeEvent}
         />
       )}
     </main>
