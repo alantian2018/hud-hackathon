@@ -74,7 +74,7 @@ def make_env_params(
     discount_time_unit_seconds: float = 60.0,
     raster_size: int = 50,
     max_event_steps: int = 512,
-    assignment_max_route_edges: int = 6,
+    assignment_max_route_edges: int = 15,
 ) -> EnvParams:
     if initial_car_nodes is None:
         initial = np.zeros((max_cars,), dtype=np.int32)

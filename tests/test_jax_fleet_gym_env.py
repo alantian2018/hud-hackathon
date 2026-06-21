@@ -244,7 +244,7 @@ def test_live_cli_defaults_to_sf_graph() -> None:
     assert np.isinf(args.episode_seconds)
     assert args.max_steps is None
     assert args.max_cars == 40
-    assert args.assignment_max_route_edges == 6
+    assert args.assignment_max_route_edges == 15
     assert args.render_scale == 1
     assert args.sim_steps_per_render == 1
     assert args.jit is True

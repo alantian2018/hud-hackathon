@@ -28,11 +28,13 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--num-updates", default=1, type=int)
     train_parser.add_argument("--max-cars", default=1, type=int)
     train_parser.add_argument("--max-requests", default=16, type=int)
-    train_parser.add_argument("--assignment-max-route-edges", default=6, type=int)
+    train_parser.add_argument("--assignment-max-route-edges", default=15, type=int)
     train_parser.add_argument("--episode-seconds", default=3600.0, type=float)
     train_parser.add_argument("--spawn-rate-per-minute", default=0.0, type=float)
     train_parser.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
     train_parser.add_argument("--learning-rate", default=3e-4, type=float)
+    train_parser.add_argument("--update-epochs", default=4, type=int)
+    train_parser.add_argument("--num-minibatches", default=4, type=int)
     train_parser.add_argument("--checkpoint-dir", default="runs/jax_fleet/checkpoints")
     train_parser.add_argument("--checkpoint-every", default=1, type=int)
     train_parser.add_argument("--metrics-path", default="runs/jax_fleet/metrics.jsonl")
@@ -48,7 +50,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--steps", default=256, type=int)
     benchmark.add_argument("--max-cars", default=1, type=int)
     benchmark.add_argument("--max-requests", default=16, type=int)
-    benchmark.add_argument("--assignment-max-route-edges", default=6, type=int)
+    benchmark.add_argument("--assignment-max-route-edges", default=15, type=int)
     benchmark.add_argument("--episode-seconds", default=3600.0, type=float)
     benchmark.add_argument("--spawn-rate-per-minute", default=0.0, type=float)
     benchmark.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
@@ -96,6 +98,8 @@ def main(argv: list[str] | None = None) -> int:
             spawn_rate_per_minute=args.spawn_rate_per_minute,
             spawn_source=args.spawn_source,
             learning_rate=args.learning_rate,
+            update_epochs=args.update_epochs,
+            num_minibatches=args.num_minibatches,
             checkpoint_dir=Path(args.checkpoint_dir) if args.checkpoint_dir else None,
             checkpoint_every=args.checkpoint_every,
             metrics_path=Path(args.metrics_path) if args.metrics_path else None,

@@ -436,7 +436,12 @@ def test_reset_step_jit_and_vmap_shapes() -> None:
     state, ts = jitted_step(state, jnp.int32(0), params)
 
     assert state.car_nodes.shape == (2,)
-    assert ts.observation.raster.shape == (50, 50, 3)
+    assert ts.observation.raster.shape == (50, 50, 5)
+    assert ts.observation.local_raster.shape == (50, 50, 5)
+    assert float(ts.observation.raster[:, :, 3].max()) > 0.0
+    assert float(ts.observation.raster[:, :, 4].sum()) == 1.0
+    assert float(ts.observation.local_raster[:, :, 3].max()) > 0.0
+    assert float(ts.observation.local_raster[25, 25, 4]) == 1.0
     keys = jax.random.split(jax.random.PRNGKey(5), 3)
     states, timesteps = jax.vmap(lambda k: reset(k, params))(keys)
     assert states.car_nodes.shape == (3, 2)

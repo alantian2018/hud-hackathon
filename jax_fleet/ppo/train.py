@@ -34,7 +34,7 @@ class TrainingConfig:
     num_updates: int = 1
     max_cars: int = 1
     max_requests: int = 16
-    assignment_max_route_edges: int = 6
+    assignment_max_route_edges: int = 15
     episode_seconds: float = 3600.0
     spawn_rate_per_minute: float = 0.0
     spawn_source: str | None = None
@@ -44,6 +44,8 @@ class TrainingConfig:
     value_coef: float = 0.5
     entropy_coef: float = 0.01
     max_grad_norm: float = 0.5
+    update_epochs: int = 4
+    num_minibatches: int = 4
     checkpoint_dir: Path | str | None = Path("runs/jax_fleet/checkpoints")
     checkpoint_every: int = 1
     metrics_path: Path | str | None = Path("runs/jax_fleet/metrics.jsonl")
@@ -191,8 +193,10 @@ def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
             "old_log_probs": rollout["log_probs"].reshape((-1,)),
             "advantages": advantages.reshape((-1,)),
             "returns": returns.reshape((-1,)),
+            "values": rollout["values"].reshape((-1,)),
         }
-        learner, loss_metrics = _ppo_update(learner, batch_obs, batch, config)
+        rng, update_rng = jax.random.split(rng)
+        learner, loss_metrics = _ppo_update(learner, batch_obs, batch, config, update_rng)
         metrics = {
             "update": update,
             "updates": update,
@@ -200,6 +204,8 @@ def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
             "last_policy_loss": float(loss_metrics["policy_loss"]),
             "last_value_loss": float(loss_metrics["value_loss"]),
             "last_entropy": float(loss_metrics["entropy"]),
+            "last_approx_kl": float(loss_metrics["approx_kl"]),
+            "last_clipfrac": float(loss_metrics["clipfrac"]),
             "last_mean_reward": float(jnp.asarray(rollout["rewards"]).mean()),
             "latest_checkpoint": None,
         }
@@ -443,9 +449,83 @@ def _collect_rollout_scan(
 
 
 @partial(jax.jit, static_argnames=("config",))
-def _ppo_update(learner: TrainState, observation_batch, batch: dict[str, Any], config: TrainingConfig):
+def _ppo_update(
+    learner: TrainState,
+    observation_batch,
+    batch: dict[str, Any],
+    config: TrainingConfig,
+    rng,
+):
     advantages = batch["advantages"]
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
+    batch = {**batch, "advantages": advantages}
+
+    batch_size = batch["actions"].shape[0]
+    num_minibatches = max(1, min(int(config.num_minibatches), int(batch_size)))
+    minibatch_size = (int(batch_size) + num_minibatches - 1) // num_minibatches
+    padded_size = num_minibatches * minibatch_size
+    pad_amount = padded_size - int(batch_size)
+    sample_mask = jnp.concatenate(
+        [
+            jnp.ones((batch_size,), dtype=jnp.float32),
+            jnp.zeros((pad_amount,), dtype=jnp.float32),
+        ],
+        axis=0,
+    )
+    padded_obs = _pad_batch_tree(observation_batch, pad_amount)
+    padded_batch = _pad_batch_tree(batch, pad_amount)
+
+    def update_epoch(carry, epoch_rng):
+        epoch_learner = carry
+        permutation = jax.random.permutation(epoch_rng, padded_size)
+        shuffled_obs = jax.tree_util.tree_map(
+            lambda leaf: leaf[permutation].reshape(
+                (num_minibatches, minibatch_size) + leaf.shape[1:]
+            ),
+            padded_obs,
+        )
+        shuffled_batch = jax.tree_util.tree_map(
+            lambda leaf: leaf[permutation].reshape(
+                (num_minibatches, minibatch_size) + leaf.shape[1:]
+            ),
+            padded_batch,
+        )
+        shuffled_mask = sample_mask[permutation].reshape((num_minibatches, minibatch_size))
+
+        def update_minibatch(inner_learner, minibatch):
+            minibatch_obs, minibatch_batch, minibatch_mask = minibatch
+            next_learner, metrics = _ppo_minibatch_update(
+                inner_learner,
+                minibatch_obs,
+                minibatch_batch,
+                minibatch_mask,
+                config,
+            )
+            return next_learner, metrics
+
+        return jax.lax.scan(
+            update_minibatch,
+            epoch_learner,
+            (shuffled_obs, shuffled_batch, shuffled_mask),
+        )
+
+    epoch_rngs = jax.random.split(rng, max(1, int(config.update_epochs)))
+    learner, metrics = jax.lax.scan(update_epoch, learner, epoch_rngs)
+    metrics = jax.tree_util.tree_map(lambda leaf: leaf.mean(), metrics)
+    return learner, metrics
+
+
+def _ppo_minibatch_update(
+    learner: TrainState,
+    observation_batch,
+    batch: dict[str, Any],
+    sample_mask,
+    config: TrainingConfig,
+):
+    normalizer = jnp.maximum(sample_mask.sum(), 1.0)
+
+    def weighted_mean(values):
+        return jnp.sum(values * sample_mask) / normalizer
 
     def loss_fn(params):
         logits, new_values = learner.apply_fn({"params": params}, observation_batch)
@@ -453,21 +533,48 @@ def _ppo_update(learner: TrainState, observation_batch, batch: dict[str, Any], c
         new_log_probs = jnp.take_along_axis(log_probs, batch["actions"][:, None], axis=1).squeeze(1)
         ratio = jnp.exp(new_log_probs - batch["old_log_probs"])
         clipped_ratio = jnp.clip(ratio, 1.0 - config.clip_coef, 1.0 + config.clip_coef)
-        policy_loss = -jnp.mean(jnp.minimum(ratio * advantages, clipped_ratio * advantages))
-        value_loss = jnp.mean((batch["returns"] - new_values) ** 2)
+        policy_loss = -weighted_mean(
+            jnp.minimum(ratio * batch["advantages"], clipped_ratio * batch["advantages"])
+        )
+        value_pred_clipped = batch["values"] + jnp.clip(
+            new_values - batch["values"],
+            -config.clip_coef,
+            config.clip_coef,
+        )
+        value_loss = (new_values - batch["returns"]) ** 2
+        value_loss_clipped = (value_pred_clipped - batch["returns"]) ** 2
+        value_loss = 0.5 * weighted_mean(jnp.maximum(value_loss, value_loss_clipped))
         probs = jax.nn.softmax(logits)
-        entropy = -jnp.mean(jnp.sum(probs * log_probs, axis=-1))
+        entropy = weighted_mean(-jnp.sum(probs * log_probs, axis=-1))
+        old_approx_kl = weighted_mean(-jnp.log(ratio))
+        approx_kl = weighted_mean((ratio - 1.0) - jnp.log(ratio))
+        clipfrac = weighted_mean((jnp.abs(ratio - 1.0) > config.clip_coef).astype(jnp.float32))
         loss = policy_loss + config.value_coef * value_loss - config.entropy_coef * entropy
         return loss, {
             "loss": loss,
             "policy_loss": policy_loss,
             "value_loss": value_loss,
             "entropy": entropy,
+            "old_approx_kl": old_approx_kl,
+            "approx_kl": approx_kl,
+            "clipfrac": clipfrac,
         }
 
     (_, metrics), grads = jax.value_and_grad(loss_fn, has_aux=True)(learner.params)
     learner = learner.apply_gradients(grads=grads)
     return learner, metrics
+
+
+def _pad_batch_tree(tree, pad_amount: int):
+    if int(pad_amount) <= 0:
+        return tree
+    return jax.tree_util.tree_map(
+        lambda leaf: jnp.pad(
+            leaf,
+            [(0, int(pad_amount))] + [(0, 0)] * (leaf.ndim - 1),
+        ),
+        tree,
+    )
 
 
 def _flatten_time_env_tree(tree):

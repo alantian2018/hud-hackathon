@@ -42,7 +42,7 @@ existing map artifacts. It is separate from the React/Deck.gl frontend.
   while locations follow the density heatmap.
 - Queued requests are assigned deterministically to the eligible car with the
   lowest directed ETA, but only after that car's directed route to the request
-  origin is within `assignment_max_route_edges` hops. The default is 6 route
+  origin is within `assignment_max_route_edges` hops. The default is 15 route
   edges.
 - Invalid action slots fall back to the first valid outgoing edge and increment
   `metrics.invalid_actions`.
@@ -56,7 +56,10 @@ existing map artifacts. It is separate from the React/Deck.gl frontend.
 
 Each timestep includes:
 
-- `raster`: `50x50x3` car/request/congestion channels.
+- `raster`: global `50x50x5` map with car counts, queued request origins,
+  congestion, request-origin density likelihood, and a one-hot focus-car block.
+- `local_raster`: centered `50x50x5` intersection-level view around the
+  decision car with the same channels projected from lon/lat coordinates.
 - `structured`: compact scalar environment features.
 - `candidate_edges`: per-action edge features.
 - `action_mask`: valid outgoing-edge slots for the current car.
@@ -71,14 +74,16 @@ JIT and does not affect training code.
 ## PPO
 
 `jax_fleet.ppo` contains a CleanRL-style Flax actor-critic and smoke trainer.
-The model combines a small CNN raster encoder, structured-feature MLP, and
-candidate-edge encoder, then masks logits over `graph.max_degree`.
+The model combines global and local CNN raster encoders, a structured-feature
+MLP, and a candidate-edge encoder, then masks logits over `graph.max_degree`.
 
 The trainer uses vectorized envs, variable-time GAE with per-transition
-discounts, clipped policy loss, value loss, entropy bonus, gradient clipping,
-JSONL metric logging, and Orbax checkpoints. It defaults to synthetic graphs;
-full SF training loads the public-data graph with routing enabled and uses the
-cached dense routing tables.
+discounts, shuffled minibatches over multiple update epochs, clipped policy
+loss, clipped value loss, entropy bonus, gradient clipping, JSONL metric
+logging, and Orbax checkpoints. It is intentionally close to CleanRL's JAX PPO
+loop, adapted to the event-driven fleet environment. It defaults to synthetic
+graphs; full SF training loads the public-data graph with routing enabled and
+uses the cached dense routing tables.
 
 ## Commands
 
@@ -99,6 +104,8 @@ python3 -m jax_fleet.cli train \
   --num-envs 4 \
   --num-steps 16 \
   --num-updates 2 \
+  --update-epochs 4 \
+  --num-minibatches 4 \
   --checkpoint-dir runs/jax_fleet/synthetic/checkpoints \
   --metrics-path runs/jax_fleet/synthetic/metrics.jsonl
 ```
@@ -113,9 +120,11 @@ python3 -m jax_fleet.cli train \
   --num-envs 8 \
   --num-steps 64 \
   --num-updates 1000 \
+  --update-epochs 4 \
+  --num-minibatches 4 \
   --max-cars 16 \
   --max-requests 256 \
-  --assignment-max-route-edges 6 \
+  --assignment-max-route-edges 15 \
   --spawn-source density \
   --checkpoint-dir runs/jax_fleet/sf/checkpoints \
   --metrics-path runs/jax_fleet/sf/metrics.jsonl

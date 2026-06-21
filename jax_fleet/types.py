@@ -41,7 +41,7 @@ class EnvParams:
     raster_size: int = struct.field(pytree_node=False, default=50)
     max_event_steps: int = struct.field(pytree_node=False, default=512)
     target_active_requests: int = struct.field(pytree_node=False, default=0)
-    assignment_max_route_edges: int = struct.field(pytree_node=False, default=6)
+    assignment_max_route_edges: int = struct.field(pytree_node=False, default=15)
     initial_car_nodes: Array = struct.field(default_factory=lambda: jnp.zeros((1,), jnp.int32))
     start_time_seconds: Array = struct.field(default_factory=lambda: jnp.asarray(0.0, jnp.float32))
     episode_seconds: Array = struct.field(default_factory=lambda: jnp.asarray(3600.0, jnp.float32))
@@ -68,6 +68,7 @@ class EnvParams:
 @struct.dataclass
 class Observation:
     raster: Array
+    local_raster: Array
     structured: Array
     candidate_edges: Array
     action_mask: Array

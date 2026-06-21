@@ -110,6 +110,8 @@ def test_train_writes_metrics_checkpoint_and_resumes(tmp_path: Path) -> None:
     first = train(config, graph=graph)
 
     assert first["updates"] == 1
+    assert np.isfinite(first["last_approx_kl"])
+    assert np.isfinite(first["last_clipfrac"])
     assert first["latest_checkpoint"] is not None
     assert Path(first["latest_checkpoint"]).exists()
     lines = metrics_path.read_text(encoding="utf-8").strip().splitlines()
@@ -165,7 +167,9 @@ def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -
     assert train_args.graph == "synthetic"
     assert train_args.spawn_source == "uniform"
     assert train_args.num_updates == 2
-    assert train_args.assignment_max_route_edges == 6
+    assert train_args.assignment_max_route_edges == 15
+    assert train_args.update_epochs == 4
+    assert train_args.num_minibatches == 4
 
     routing_args = parser.parse_args(
         [
@@ -195,4 +199,4 @@ def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -
     assert benchmark_args.command == "benchmark-env"
     assert benchmark_args.steps == 8
     assert benchmark_args.num_envs == 2
-    assert benchmark_args.assignment_max_route_edges == 6
+    assert benchmark_args.assignment_max_route_edges == 15
