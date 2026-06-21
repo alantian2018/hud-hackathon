@@ -4,3 +4,5 @@ cache
 public
 __pycache__
 runs
+*.egg-info/
+uv.lock

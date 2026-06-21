@@ -34,9 +34,14 @@ def build_observation(state: EnvState, params: EnvParams) -> Observation:
     candidate_edges = jnp.where(action_mask[:, None], candidate_edges, 0.0)
 
     queued = state.request_status == 1
+    day_phase = ((state.time_seconds / 3600.0) % 24.0) / 24.0
+    time_sin = jnp.sin(2.0 * jnp.pi * day_phase)
+    time_cos = jnp.cos(2.0 * jnp.pi * day_phase)
     structured = jnp.asarray(
         [
             (state.time_seconds - params.start_time_seconds) / jnp.maximum(params.episode_seconds, 1.0),
+            time_sin,
+            time_cos,
             current_car.astype(jnp.float32) / jnp.maximum(params.max_cars - 1, 1),
             queued.sum().astype(jnp.float32) / jnp.maximum(params.max_requests, 1),
             (state.car_status == 0).sum().astype(jnp.float32) / jnp.maximum(params.max_cars, 1),
