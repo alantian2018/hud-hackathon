@@ -124,7 +124,7 @@ class JaxFleetEnv:
         frame = self._renderer.render(
             self.scene(
                 include_static=self._renderer.needs_static_scene(time_seconds),
-                include_route_previews=False,
+                include_route_previews=True,
             )
         )
         if mode == "rgb_array":
@@ -203,14 +203,14 @@ def main(argv: list[str] | None = None) -> int:
 
     steps = 0
     try:
-        while not env.done and env.human_window_open and steps < args.max_steps:
+        while not env.done and env.human_window_open and _within_step_limit(steps, args.max_steps):
             started = time.perf_counter()
             frame_steps = 0
             while (
                 frame_steps < max(1, args.sim_steps_per_render)
                 and not env.done
                 and env.human_window_open
-                and steps < args.max_steps
+                and _within_step_limit(steps, args.max_steps)
             ):
                 action = env.sample_random_action()
                 _, reward, done, info = env.step(action)
@@ -251,9 +251,14 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-requests", type=int, default=32)
     parser.add_argument("--spawn-rate-per-minute", type=float, default=0.0)
     parser.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
-    parser.add_argument("--episode-seconds", type=float, default=240.0)
+    parser.add_argument("--episode-seconds", type=float, default=float("inf"))
     parser.add_argument("--start-time-seconds", type=float, default=7.0 * 3600.0)
-    parser.add_argument("--max-steps", type=int, default=250)
+    parser.add_argument(
+        "--max-steps",
+        type=int,
+        default=None,
+        help="Optional policy-step cap. Omit or pass 0 for an endless live loop.",
+    )
     parser.add_argument("--fps", type=float, default=12.0)
     parser.add_argument("--sim-steps-per-render", type=int, default=1)
     parser.add_argument("--width", type=int, default=1280)
@@ -282,6 +287,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
         help="Disable JAX JIT for easier debugging and stack traces.",
     )
     return parser
+
+
+def _within_step_limit(steps: int, max_steps: int | None) -> bool:
+    return max_steps is None or int(max_steps) <= 0 or int(steps) < int(max_steps)
 
 
 def _render_size(width: int, height: int, *, fullscreen: bool) -> tuple[int, int]:

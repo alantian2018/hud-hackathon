@@ -6,8 +6,8 @@ import jax
 
 from jax_fleet.env import make_env_params, reset
 from jax_fleet.graph import build_synthetic_graph
-from jax_fleet.gym_env import JaxFleetEnv, build_arg_parser
-from jax_fleet.rich_renderer import PygletWindowRenderer, RichRenderer, render_scene_to_array
+from jax_fleet.gym_env import JaxFleetEnv, _within_step_limit, build_arg_parser
+from jax_fleet.rich_renderer import PygletWindowRenderer, RichRenderer, _status_color, render_scene_to_array
 
 
 def small_loop_graph():
@@ -163,15 +163,88 @@ def test_scene_export_can_skip_static_congestion_for_live_loop() -> None:
     assert light_scene["graph"] == full_scene["graph"]
 
 
+def test_scene_export_includes_drawable_pickup_and_dropoff_route_points() -> None:
+    graph = small_loop_graph()
+    pickup_params = make_env_params(
+        graph,
+        max_cars=2,
+        max_requests=4,
+        initial_car_nodes=[0, 3],
+        preplanned_requests=[{"spawn_time_s": 0.0, "origin": 2, "destination": 0}],
+    )
+    pickup_env = JaxFleetEnv(graph=graph, params=pickup_params, seed=21)
+    pickup_env.reset()
+    pickup_scene = pickup_env.scene(include_static=False, include_route_previews=True)
+
+    dropoff_params = make_env_params(
+        graph,
+        max_cars=2,
+        max_requests=4,
+        initial_car_nodes=[2, 3],
+        preplanned_requests=[{"spawn_time_s": 0.0, "origin": 2, "destination": 0}],
+    )
+    dropoff_env = JaxFleetEnv(graph=graph, params=dropoff_params, seed=22)
+    dropoff_env.reset()
+    dropoff_scene = dropoff_env.scene(include_static=False, include_route_previews=True)
+
+    pickup_env.close()
+    dropoff_env.close()
+
+    pickup_preview = next(item for item in pickup_scene["route_previews"] if item["status"] == "to_pickup")
+    dropoff_preview = next(item for item in dropoff_scene["route_previews"] if item["status"] == "to_dropoff")
+
+    assert len(pickup_preview["points"]) >= 2
+    assert len(dropoff_preview["points"]) >= 2
+    assert pickup_preview["points"][0] == pickup_scene["cars"][pickup_preview["car_id"]]["position"]
+    assert dropoff_preview["points"][0] == dropoff_scene["cars"][dropoff_preview["car_id"]]["position"]
+
+
+def test_rich_renderer_draws_colored_pickup_and_dropoff_route_previews() -> None:
+    scene = {
+        "time_seconds": 0.0,
+        "current_car_id": 0,
+        "decision_required": True,
+        "done": False,
+        "step_count": 0,
+        "discount": 1.0,
+        "action_mask": [True],
+        "graph": {"num_nodes": 4, "num_edges": 0, "max_degree": 1, "bounds": [0.0, 0.0, 1.0, 1.0]},
+        "cars": [
+            {"id": 0, "position": [0.1, 0.1], "status": "to_pickup"},
+            {"id": 1, "position": [0.9, 0.1], "status": "to_dropoff"},
+        ],
+        "requests": [],
+        "congestion": [],
+        "status_counts": {"cars": {}, "requests": {}},
+        "metrics": {},
+        "recent_events": {"reward": 0.0, "dt_seconds": 0.0},
+        "edge_progress": [],
+        "route_previews": [
+            {"car_id": 0, "status": "to_pickup", "points": [[0.1, 0.1], [0.5, 0.7]]},
+            {"car_id": 1, "status": "to_dropoff", "points": [[0.9, 0.1], [0.4, 0.8]]},
+        ],
+    }
+
+    frame, metadata = render_scene_to_array(scene, width=640, height=420, return_metadata=True)
+
+    assert frame.std() > 0.0
+    assert metadata["route_preview_count"] == 2
+    assert _status_color("to_pickup") == "#2563eb"
+    assert _status_color("to_dropoff") == "#dc2626"
+
+
 def test_live_cli_defaults_to_sf_graph() -> None:
     args = build_arg_parser().parse_args([])
 
     assert args.graph == "sf"
     assert args.start_time_seconds == 7 * 3600.0
+    assert np.isinf(args.episode_seconds)
+    assert args.max_steps is None
     assert args.max_cars == 40
     assert args.render_scale == 1
     assert args.sim_steps_per_render == 1
     assert args.jit is True
+    assert _within_step_limit(10_000_000, args.max_steps)
 
 
 def test_live_sf_defaults_leave_policy_decision_after_immediate_js_assignments() -> None:
@@ -217,6 +290,15 @@ def test_live_cli_accepts_render_speed_controls() -> None:
     assert args.render_scale == 2
     assert args.sim_steps_per_render == 5
     assert args.jit is False
+
+
+def test_live_cli_explicit_max_steps_caps_loop() -> None:
+    args = build_arg_parser().parse_args(["--max-steps", "3", "--episode-seconds", "240"])
+
+    assert args.max_steps == 3
+    assert args.episode_seconds == 240.0
+    assert _within_step_limit(2, args.max_steps)
+    assert not _within_step_limit(3, args.max_steps)
 
 
 def test_pyglet_renderer_configures_stretch_dpi(monkeypatch) -> None:
