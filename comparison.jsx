@@ -16,12 +16,13 @@ const INITIAL_VIEW_STATE = {
   pitch: 52,
   bearing: -18
 };
+const RIDE_CAR = [245, 158, 11, 245];
 const GREEDY = {
   id: "greedy",
   label: "Greedy",
   route: [66, 133, 244, 245],
   casing: [232, 240, 254, 235],
-  active: [52, 168, 83, 245],
+  active: RIDE_CAR,
   idle: [189, 193, 198, 225],
   panel: "rgba(4,8,14,0.88)",
   accent: "#7dd3fc"
@@ -32,7 +33,7 @@ const RL = {
   route: [66, 133, 244, 245],
   casing: [232, 240, 254, 235],
   reposition: [20, 184, 166, 230],
-  active: [168, 85, 247, 245],
+  active: RIDE_CAR,
   idle: [203, 213, 225, 220],
   panel: "rgba(12,8,22,0.88)",
   accent: "#c4b5fd"
@@ -1022,12 +1023,6 @@ function Metric({label, value}) {
 }
 
 function MapLegend() {
-  const trafficItems = [
-    ["Light", [55, 124, 92, 104]],
-    ["Moderate", [185, 143, 54, 112]],
-    ["Heavy", [192, 103, 48, 124]],
-    ["Severe", [196, 58, 56, 138]]
-  ];
   return (
     <div style={{
       position: "absolute",
@@ -1051,23 +1046,11 @@ function MapLegend() {
       pointerEvents: "auto"
     }}>
       <LegendBadge label="Idle car" swatch={<DotSwatch fill="#bdbfc6" />} />
-      <LegendBadge label="Ride car" swatch={<DotSwatch fill="linear-gradient(90deg, #34a853 0 50%, #a855f7 50% 100%)" />} />
+      <LegendBadge label="Ride car" swatch={<DotSwatch fill="#f59e0b" />} />
       <LegendBadge label="Start" swatch={<DotSwatch fill="#4285f4" />} />
       <LegendBadge label="End" swatch={<DotSwatch fill="#ea4335" />} />
       <LegendBadge label="Trip route" swatch={<LineSwatch color="#4285f4" />} />
       <LegendBadge label="Reposition" swatch={<LineSwatch color="#14b8a6" />} />
-      <LegendBadge label="Surge" swatch={<DotSwatch fill="#ef4444" />} />
-      <span style={{width: 1, height: 20, background: "rgba(148,163,184,0.26)"}} />
-      <span style={{fontSize: 11, opacity: 0.58, fontWeight: 850, textTransform: "uppercase", letterSpacing: 0}}>
-        Traffic
-      </span>
-      {trafficItems.map(([label, color]) => (
-        <LegendBadge
-          key={label}
-          label={label}
-          swatch={<LineSwatch color={rgba(color)} compact />}
-        />
-      ))}
     </div>
   );
 }
