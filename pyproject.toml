@@ -11,7 +11,7 @@ dependencies = [
   "fastmcp>=2.0.0",
   "jax",
   "flax",
-  "hud-python",
+  "hud-python>=0.6,<0.7",
   "optax",
   "orbax-checkpoint",
   "numpy",
