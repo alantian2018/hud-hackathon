@@ -708,10 +708,10 @@ function makeEventFeatureCollection(event) {
 }
 
 function trafficColor(value) {
-  if (value < 1.25) return [52, 142, 94, 145];
-  if (value < 1.75) return [218, 166, 45, 152];
-  if (value < 2.35) return [224, 119, 45, 166];
-  return [220, 64, 58, 184];
+  if (value < 1.25) return [55, 124, 92, 104];
+  if (value < 1.75) return [185, 143, 54, 112];
+  if (value < 2.35) return [192, 103, 48, 124];
+  return [196, 58, 56, 138];
 }
 
 function roadCongestionForFeature(feature, currentHour, trafficPressureByCell, grid) {
@@ -783,11 +783,11 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
           data: network,
           stroked: true,
           filled: false,
-          lineWidthMinPixels: 1.25,
-          lineWidthMaxPixels: 4.75,
+          lineWidthMinPixels: 0.85,
+          lineWidthMaxPixels: 3.65,
           getLineWidth: f => {
             const congestion = roadCongestionForFeature(f, currentHour, trafficPressureByCell, grid);
-            return 0.95 + clamp((congestion - 1) / 3.4, 0, 1) * 3.65;
+            return 0.7 + clamp((congestion - 1) / 3.4, 0, 1) * 2.75;
           },
           getLineColor: f => trafficColor(roadCongestionForFeature(f, currentHour, trafficPressureByCell, grid)),
           lineCapRounded: true,
@@ -1017,10 +1017,10 @@ function Metric({label, value}) {
 
 function TrafficLegend() {
   const items = [
-    ["Light", [52, 142, 94, 145]],
-    ["Moderate", [218, 166, 45, 152]],
-    ["Heavy", [224, 119, 45, 166]],
-    ["Severe", [220, 64, 58, 184]]
+    ["Light", [55, 124, 92, 104]],
+    ["Moderate", [185, 143, 54, 112]],
+    ["Heavy", [192, 103, 48, 124]],
+    ["Severe", [196, 58, 56, 138]]
   ];
   return (
     <div style={{display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end"}}>
