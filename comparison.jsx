@@ -83,6 +83,11 @@ function formatPct(value) {
   return `${(Number(value) || 0).toFixed(1)}%`;
 }
 
+function rgba(color) {
+  const [r, g, b, a = 255] = color;
+  return `rgba(${r},${g},${b},${a / 255})`;
+}
+
 async function fetchJson(paths) {
   let lastError = null;
   for (const path of paths) {
@@ -616,21 +621,28 @@ function avgWaitMinutes(stats) {
   return Number(stats?.wait_time_min ?? 0) / Math.max(1, completed, servedByPct);
 }
 
-function deadheadMinutes(snapshot, clockMinute, stepMinutes) {
+function deadheadStats(snapshot, clockMinute, stepMinutes) {
   const carById = new Map((snapshot?.map_dispatch?.cars ?? []).map(car => [car.id, car]));
   let totalSeconds = 0;
+  let activeSeconds = 0;
   for (const job of activeJobs(snapshot)) {
     const car = carById.get(job.car_id);
     const elapsed = jobElapsedSeconds(job, car, snapshot, clockMinute, stepMinutes);
+    const routeCost = Number(job.route?.cost ?? job.total_cost ?? 0);
+    const active = clamp(elapsed, 0, routeCost);
+    activeSeconds += active;
     if (job.kind === "reposition") {
-      const routeCost = Number(job.route?.cost ?? job.total_cost ?? 0);
-      totalSeconds += clamp(elapsed, 0, routeCost);
+      totalSeconds += active;
       continue;
     }
     const pickupCost = Number(job.pickup_route?.cost ?? 0);
     totalSeconds += clamp(elapsed, 0, pickupCost);
   }
-  return totalSeconds / 60.0;
+  return {
+    minutes: totalSeconds / 60.0,
+    activeMinutes: activeSeconds / 60.0,
+    pct: activeSeconds > 0 ? (totalSeconds / activeSeconds) * 100 : 0
+  };
 }
 
 function metricDelta(rl, greedy, key, lowerIsBetter = false) {
@@ -639,6 +651,53 @@ function metricDelta(rl, greedy, key, lowerIsBetter = false) {
   const delta = a - b;
   const good = lowerIsBetter ? delta < 0 : delta > 0;
   return {delta, good};
+}
+
+function formatCell(cell) {
+  if (!cell) return "unknown cell";
+  const row = cell.row ?? cell[0];
+  const col = cell.col ?? cell[1];
+  return `[${row}, ${col}]`;
+}
+
+function describeTraffic(bottlenecks) {
+  const top = bottlenecks?.[0];
+  if (!top) return "normal traffic pressure";
+  const value = Number(top.value ?? 0);
+  const severity = value > 2.8 ? "severe" : value > 2.0 ? "heavy" : value > 1.35 ? "moderate" : "light";
+  return `${severity} traffic near cell ${formatCell(top)}`;
+}
+
+function decisionTrace(snapshot, event) {
+  const summary = snapshot?.summary ?? {};
+  const dispatch = snapshot?.map_dispatch ?? {};
+  const bottlenecks = summary.traffic_bottlenecks ?? [];
+  const hotspots = summary.top_demand_cells ?? [];
+  const assignments = dispatch.assignments ?? [];
+  const repositions = dispatch.repositions ?? [];
+  const newAssignments = dispatch.new_assignments ?? [];
+  const newRepositions = dispatch.new_repositions ?? [];
+  const cars = dispatch.cars ?? [];
+  const idleCars = cars.filter(car => car.status === "idle").length;
+  const hotspot = hotspots[0];
+  const traffic = describeTraffic(bottlenecks);
+  const eventLabel = event?.short_label ?? event?.label ?? "base demand";
+  const proposerTarget = hotspot ? `closest high-demand cells around ${formatCell(hotspot)}` : "current highest-value waiting requests";
+  const perimeterCue = event ? "perimeter pickup cells outside the surge core" : "lower-traffic pickup corridors";
+  const pressureCue = bottlenecks[0] && hotspots[0]
+    ? Number(bottlenecks[0].value ?? 0) > Number(hotspots[0].value ?? 0) * 0.8
+    : false;
+  return {
+    observed: `${eventLabel}: ${hotspot ? `demand spike near cell ${formatCell(hotspot)}` : "steady request stream"}, ${traffic}.`,
+    proposer: `Local proposer prioritizes ${proposerTarget}; active plan has ${assignments.length} assignments.`,
+    override: newRepositions.length || repositions.length
+      ? `LLM override shifts ${newRepositions.length || repositions.length} cars toward ${perimeterCue}.`
+      : `LLM override holds ${idleCars} idle cars instead of overconcentrating supply.`,
+    reason: pressureCue
+      ? "Main hotspot is traffic-constrained; nearby corridors preserve future supply while avoiding queue buildup."
+      : "Plan balances immediate pickup value against future demand and no-passenger travel.",
+    action: `${newAssignments.length || assignments.length} assignments, ${newRepositions.length || repositions.length} repositions, ${idleCars} holds.`
+  };
 }
 
 function eventChoices(greedyWorld, rlWorld) {
@@ -657,6 +716,7 @@ function eventChoices(greedyWorld, rlWorld) {
 }
 
 function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, clockMinute, stepMinutes, viewState, setViewState, height, event}) {
+  const [traceOpen, setTraceOpen] = useState(false);
   const cars = useMemo(
     () => animatedCars(snapshot, routeIndex, clockMinute, stepMinutes),
     [snapshot, routeIndex, clockMinute, stepMinutes]
@@ -674,7 +734,8 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
     [snapshot, grid, clockMinute, stepMinutes]
   );
   const metrics = metricsFor(snapshot, policy.id);
-  const deadhead = deadheadMinutes(snapshot, clockMinute, stepMinutes);
+  const deadhead = deadheadStats(snapshot, clockMinute, stepMinutes);
+  const trace = policy.id === "rl" ? decisionTrace(snapshot, event) : null;
   const currentHour = Math.floor(clamp(clockMinute, 0, DAY_MINUTES - 1) / 60);
   const layers = useMemo(() => {
     const roads = network
@@ -872,7 +933,7 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
         color: "white",
         fontFamily: "system-ui, sans-serif",
         boxShadow: "0 18px 52px rgba(0,0,0,0.38)",
-        pointerEvents: "none"
+        pointerEvents: policy.id === "rl" ? "auto" : "none"
       }}>
         <div style={{fontSize: 12, opacity: 0.68}}>Same map, same request stream</div>
         <div style={{fontSize: 20, fontWeight: 800, color: policy.accent, marginTop: 2}}>{policy.label}</div>
@@ -881,14 +942,21 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
           <Metric label="Revenue" value={formatMoney(metrics.revenue)} />
           <Metric label="Demand" value={formatPct(metrics.demand_served_pct)} />
           <Metric label="Avg Wait" value={`${avgWaitMinutes(metrics).toFixed(1)}m`} />
-          <Metric label="Deadhead" value={`${deadhead.toFixed(1)}m`} />
+          <Metric label="Deadhead %" value={formatPct(deadhead.pct)} />
           <Metric label="Util." value={formatPct(metrics.avg_fleet_utilization_pct ?? metrics.fleet_utilization_pct)} />
           <Metric label="Active" value={Number(metrics.active_cars ?? 0).toLocaleString()} />
         </div>
         {policy.id === "rl" && (
-          <div style={{fontSize: 12, opacity: 0.76, marginTop: 10}}>
-            Repositioning cars: {metrics.repositioning_cars ?? 0}
-          </div>
+          <>
+            <div style={{fontSize: 12, opacity: 0.76, marginTop: 10}}>
+              Repositioning cars: {metrics.repositioning_cars ?? 0}
+            </div>
+            <AgentTracePanel
+              open={traceOpen}
+              setOpen={setTraceOpen}
+              trace={trace}
+            />
+          </>
         )}
       </div>
     </section>
@@ -904,6 +972,84 @@ function Metric({label, value}) {
   );
 }
 
+function AgentTracePanel({open, setOpen, trace}) {
+  const rows = [
+    ["Observed", trace?.observed],
+    ["CNN/local proposer", trace?.proposer],
+    ["LLM override", trace?.override],
+    ["Reason", trace?.reason],
+    ["Action", trace?.action]
+  ];
+  return (
+    <div style={{marginTop: 10, borderTop: "1px solid rgba(255,255,255,0.12)", paddingTop: 9}}>
+      <button
+        type="button"
+        onClick={() => setOpen(value => !value)}
+        style={{
+          width: "100%",
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "center",
+          padding: "7px 8px",
+          borderRadius: 7,
+          border: "1px solid rgba(196,181,253,0.34)",
+          background: "rgba(30,20,52,0.86)",
+          color: "white",
+          cursor: "pointer",
+          fontWeight: 800,
+          fontSize: 12
+        }}
+      >
+        <span>LLM Orchestrator Decision</span>
+        <span style={{color: "#c4b5fd"}}>{open ? "Hide" : "Show"}</span>
+      </button>
+      {open && (
+        <div style={{display: "grid", gap: 7, marginTop: 8, fontSize: 12, lineHeight: 1.28}}>
+          {rows.map(([label, value]) => (
+            <div key={label} style={{padding: "7px 8px", borderRadius: 7, background: "rgba(255,255,255,0.06)", border: "1px solid rgba(255,255,255,0.08)"}}>
+              <div style={{color: "#c4b5fd", fontWeight: 800, marginBottom: 3}}>{label}</div>
+              <div style={{opacity: 0.82}}>{value}</div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TrafficLegend() {
+  const items = [
+    ["Light", [52, 168, 83, 225]],
+    ["Moderate", [251, 188, 4, 230]],
+    ["Heavy", [251, 140, 0, 235]],
+    ["Severe", [234, 67, 53, 240]]
+  ];
+  return (
+    <div style={{display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end"}}>
+      <span style={{fontSize: 12, opacity: 0.62, fontWeight: 700}}>Traffic</span>
+      {items.map(([label, color]) => (
+        <span
+          key={label}
+          style={{
+            display: "inline-flex",
+            alignItems: "center",
+            gap: 5,
+            padding: "5px 7px",
+            borderRadius: 7,
+            background: "rgba(15,23,42,0.72)",
+            border: "1px solid rgba(148,163,184,0.24)",
+            fontSize: 12,
+            color: "rgba(255,255,255,0.82)"
+          }}
+        >
+          <span style={{width: 20, height: 3, borderRadius: 99, background: rgba(color), display: "inline-block"}} />
+          {label}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 function DeltaBar({greedySnapshot, rlSnapshot, greedyDeadhead, rlDeadhead}) {
   const greedy = metricsFor(greedySnapshot, "greedy");
   const rl = metricsFor(rlSnapshot, "rl");
@@ -915,8 +1061,8 @@ function DeltaBar({greedySnapshot, rlSnapshot, greedyDeadhead, rlDeadhead}) {
     good: avgWaitMinutes(rl) < avgWaitMinutes(greedy)
   };
   const deadhead = {
-    delta: Number(rlDeadhead ?? 0) - Number(greedyDeadhead ?? 0),
-    good: Number(rlDeadhead ?? 0) < Number(greedyDeadhead ?? 0)
+    delta: Number(rlDeadhead?.pct ?? 0) - Number(greedyDeadhead?.pct ?? 0),
+    good: Number(rlDeadhead?.pct ?? 0) < Number(greedyDeadhead?.pct ?? 0)
   };
   return (
     <div style={{display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13}}>
@@ -924,7 +1070,7 @@ function DeltaBar({greedySnapshot, rlSnapshot, greedyDeadhead, rlDeadhead}) {
       <Delta label="Revenue" value={revenue.delta} good={revenue.good} money />
       <Delta label="Demand" value={demand.delta} good={demand.good} suffix="pp" />
       <Delta label="Avg Wait" value={avgWait.delta} good={avgWait.good} suffix="m" />
-      <Delta label="Deadhead" value={deadhead.delta} good={deadhead.good} suffix="m" />
+      <Delta label="Deadhead %" value={deadhead.delta} good={deadhead.good} suffix="pp" />
     </div>
   );
 }
@@ -1062,6 +1208,7 @@ function ControlBar({
             })}
           </div>
         )}
+        <TrafficLegend />
       </div>
     </header>
   );
@@ -1158,8 +1305,8 @@ function ComparisonShell({compare}) {
 
   const greedySnapshot = snapshotAt(greedySnapshots, clockMinute);
   const rlSnapshot = snapshotAt(rlSnapshots, clockMinute);
-  const greedyDeadhead = deadheadMinutes(greedySnapshot, clockMinute, greedyStep);
-  const rlDeadhead = deadheadMinutes(rlSnapshot, clockMinute, rlStep);
+  const greedyDeadhead = deadheadStats(greedySnapshot, clockMinute, greedyStep);
+  const rlDeadhead = deadheadStats(rlSnapshot, clockMinute, rlStep);
   const onStart = () => {
     if (clockMinute >= endMinute - 0.01) setClockMinute(PRE_FRAME_MINUTE);
     setRunning(true);
