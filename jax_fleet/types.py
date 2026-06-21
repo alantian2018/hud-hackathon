@@ -79,6 +79,10 @@ class EnvMetrics:
     completed_requests: Array
     queued_requests: Array
     pickup_wait_seconds: Array
+    aggregate_reward: Array
+    recent_pickup_wait_seconds: Array
+    recent_pickup_wait_count: Array
+    recent_pickup_wait_index: Array
 
 
 @struct.dataclass

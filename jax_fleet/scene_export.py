@@ -156,6 +156,9 @@ def export_scene(
     active_requests = int(
         np.isin(request_status, [REQUEST_QUEUED, REQUEST_ASSIGNED, REQUEST_ONBOARD]).sum()
     )
+    recent_pickup_count = int(np.asarray(state.metrics.recent_pickup_wait_count))
+    recent_pickup_total = float(np.asarray(state.metrics.recent_pickup_wait_seconds).sum())
+    avg_pickup_wait_last_10 = recent_pickup_total / max(1, recent_pickup_count)
     metrics = {
         "completed_requests": int(np.asarray(state.metrics.completed_requests)),
         "dropped_requests": int(np.asarray(state.metrics.dropped_requests)),
@@ -164,6 +167,9 @@ def export_scene(
         "target_active_requests": int(params.target_active_requests),
         "invalid_actions": int(np.asarray(state.metrics.invalid_actions)),
         "pickup_wait_seconds": float(np.asarray(state.metrics.pickup_wait_seconds)),
+        "avg_pickup_wait_last_10_seconds": avg_pickup_wait_last_10,
+        "recent_pickup_wait_count": recent_pickup_count,
+        "aggregate_reward": float(np.asarray(state.metrics.aggregate_reward)),
     }
 
     return {
