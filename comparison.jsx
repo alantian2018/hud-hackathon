@@ -29,8 +29,8 @@ const GREEDY = {
 const RL = {
   id: "rl",
   label: "RL Orchestrator",
-  route: [168, 85, 247, 245],
-  casing: [245, 243, 255, 230],
+  route: [66, 133, 244, 245],
+  casing: [232, 240, 254, 235],
   reposition: [20, 184, 166, 230],
   active: [168, 85, 247, 245],
   idle: [203, 213, 225, 220],
@@ -38,6 +38,14 @@ const RL = {
   accent: "#c4b5fd"
 };
 const MAX_VISIBLE_ROUTE_SEGMENT_METERS = 650;
+const PICKUP_BLUE = [66, 133, 244, 245];
+const PICKUP_BLUE_FILL = [66, 133, 244, 160];
+const DESTINATION_RED = [234, 67, 53, 245];
+const DESTINATION_RED_FILL = [234, 67, 53, 150];
+const PEOPLE_GRID_EMPTY_FILL = [18, 34, 52, 0];
+const PEOPLE_GRID_EMPTY_LINE = [138, 180, 248, 34];
+const PEOPLE_GRID_BOTH_FILL = [168, 85, 247, 155];
+const PEOPLE_GRID_BOTH_LINE = [216, 180, 254, 230];
 
 function buildStyleUrl() {
   return `https://api.maptiler.com/maps/streets-v2-dark/style.json?key=${MAPTILER_KEY}`;
@@ -339,6 +347,179 @@ function makePeopleFeatures(snapshot) {
   return {type: "FeatureCollection", features};
 }
 
+function gridKey(row, col) {
+  return `${row}:${col}`;
+}
+
+function makeGridFeatureCollection(grid) {
+  if (!grid?.bounds) return null;
+  const {
+    rows,
+    cols,
+    bounds: {min_lon: minLon, max_lon: maxLon, min_lat: minLat, max_lat: maxLat},
+    values
+  } = grid;
+  if (!rows || !cols) return null;
+  const dLon = (maxLon - minLon) / cols;
+  const dLat = (maxLat - minLat) / rows;
+  const features = [];
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      const west = minLon + col * dLon;
+      const east = west + dLon;
+      const south = minLat + row * dLat;
+      const north = south + dLat;
+      features.push({
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [west, south],
+              [east, south],
+              [east, north],
+              [west, north],
+              [west, south]
+            ]
+          ]
+        },
+        properties: {
+          row,
+          col,
+          population_density: values?.[row]?.[col] ?? 0
+        }
+      });
+    }
+  }
+  return {type: "FeatureCollection", features};
+}
+
+function gridCellForPosition(position, grid) {
+  if (!position || !grid?.bounds) return null;
+  const {
+    rows,
+    cols,
+    bounds: {min_lon: minLon, max_lon: maxLon, min_lat: minLat, max_lat: maxLat}
+  } = grid;
+  const [lon, lat] = position;
+  if (lon < minLon || lon > maxLon || lat < minLat || lat > maxLat) return null;
+  const col = clamp(Math.floor(((lon - minLon) / (maxLon - minLon)) * cols), 0, cols - 1);
+  const row = clamp(Math.floor(((lat - minLat) / (maxLat - minLat)) * rows), 0, rows - 1);
+  return {row, col, key: gridKey(row, col)};
+}
+
+function makeNodeCountsByGridCell(nodes, grid) {
+  const counts = new Map();
+  for (const node of nodes ?? []) {
+    const hasGridCell = Number.isFinite(node.grid_row) && Number.isFinite(node.grid_col);
+    const cell = hasGridCell
+      ? {row: node.grid_row, col: node.grid_col, key: gridKey(node.grid_row, node.grid_col)}
+      : gridCellForPosition([node.lon, node.lat], grid);
+    if (!cell) continue;
+    counts.set(cell.key, (counts.get(cell.key) ?? 0) + 1);
+  }
+  return counts;
+}
+
+function makeCarPresenceGridFeatureCollection(grid, cars, nodeCountsByCell) {
+  const collection = makeGridFeatureCollection(grid);
+  if (!collection) return null;
+  const presence = new Map();
+  for (const car of cars ?? []) {
+    const providedCell = car.grid_cell ?? car.grid_position;
+    const cell = providedCell
+      ? {row: providedCell[0], col: providedCell[1], key: gridKey(providedCell[0], providedCell[1])}
+      : gridCellForPosition(car.position, grid);
+    if (!cell) continue;
+    const current = presence.get(cell.key) ?? {
+      row: cell.row,
+      col: cell.col,
+      car_ids: [],
+      active_count: 0,
+      idle_count: 0,
+      repositioning_count: 0
+    };
+    current.car_ids.push(car.id);
+    if (car.status === "idle") current.idle_count += 1;
+    else if (car.status === "repositioning") current.repositioning_count += 1;
+    else current.active_count += 1;
+    presence.set(cell.key, current);
+  }
+  return {
+    ...collection,
+    features: collection.features.map(feature => {
+      const {row, col} = feature.properties;
+      const cell = presence.get(gridKey(row, col));
+      const carCount = cell?.car_ids.length ?? 0;
+      return {
+        ...feature,
+        properties: {
+          ...feature.properties,
+          ...(cell ?? {}),
+          has_car: carCount > 0,
+          car_count: carCount,
+          intersection_count: nodeCountsByCell.get(gridKey(row, col)) ?? 0
+        }
+      };
+    })
+  };
+}
+
+function makePeopleGridFeatureCollection(snapshot, grid) {
+  const collection = makeGridFeatureCollection(grid);
+  if (!collection) return null;
+  const cells = new Map();
+  const register = (cell, kind, person) => {
+    if (!cell) return;
+    const [row, col] = cell;
+    const key = gridKey(row, col);
+    const current = cells.get(key) ?? {
+      row,
+      col,
+      pickup_count: 0,
+      dropoff_count: 0,
+      pickup_ids: [],
+      dropoff_ids: [],
+      pickup_nodes: [],
+      dropoff_nodes: []
+    };
+    if (kind === "pickup") {
+      current.pickup_count += 1;
+      current.pickup_ids.push(person.id);
+      if (person.pickup_node_id) current.pickup_nodes.push(person.pickup_node_id);
+    } else {
+      current.dropoff_count += 1;
+      current.dropoff_ids.push(person.id);
+      if (person.dropoff_node_id) current.dropoff_nodes.push(person.dropoff_node_id);
+    }
+    cells.set(key, current);
+  };
+  for (const person of snapshot?.map_people ?? []) {
+    register(person.pickup_grid_cell ?? person.origin, "pickup", person);
+    register(person.dropoff_grid_cell ?? person.destination, "dropoff", person);
+  }
+  return {
+    ...collection,
+    features: collection.features.map(feature => {
+      const {row, col} = feature.properties;
+      const cell = cells.get(gridKey(row, col));
+      const pickupCount = cell?.pickup_count ?? 0;
+      const dropoffCount = cell?.dropoff_count ?? 0;
+      return {
+        ...feature,
+        properties: {
+          ...feature.properties,
+          ...(cell ?? {}),
+          has_people: pickupCount + dropoffCount > 0,
+          has_pickup: pickupCount > 0,
+          has_dropoff: dropoffCount > 0,
+          people_count: pickupCount + dropoffCount
+        }
+      };
+    })
+  };
+}
+
 function circlePolygon(center, radiusM, steps = 96) {
   if (!Array.isArray(center) || center.length < 2) return [];
   const [lon, lat] = center.map(Number);
@@ -416,10 +597,22 @@ function eventChoices(greedyWorld, rlWorld) {
     }));
 }
 
-function MapPanel({policy, world, network, snapshot, routeIndex, clockMinute, stepMinutes, viewState, setViewState, height, event}) {
+function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, clockMinute, stepMinutes, viewState, setViewState, height, event}) {
   const cars = useMemo(
     () => animatedCars(snapshot, routeIndex, clockMinute, stepMinutes),
     [snapshot, routeIndex, clockMinute, stepMinutes]
+  );
+  const nodeCountsByCell = useMemo(
+    () => makeNodeCountsByGridCell(nodes, grid),
+    [nodes, grid]
+  );
+  const carGridData = useMemo(
+    () => makeCarPresenceGridFeatureCollection(grid, snapshot?.map_dispatch?.cars ?? [], nodeCountsByCell),
+    [grid, snapshot, nodeCountsByCell]
+  );
+  const peopleGridData = useMemo(
+    () => makePeopleGridFeatureCollection(snapshot, grid),
+    [snapshot, grid]
   );
   const metrics = metricsFor(snapshot, policy.id);
   const currentHour = Math.floor(clamp(clockMinute, 0, DAY_MINUTES - 1) / 60);
@@ -438,6 +631,51 @@ function MapPanel({policy, world, network, snapshot, routeIndex, clockMinute, st
           },
           getLineColor: f => trafficColor(f.properties?.hourly_congestion_factor?.[currentHour] ?? 1),
           pickable: false
+        })
+      : null;
+    const carGrid = carGridData
+      ? new GeoJsonLayer({
+          id: `${policy.id}-car-grid`,
+          data: carGridData,
+          stroked: true,
+          filled: true,
+          pickable: true,
+          autoHighlight: true,
+          highlightColor: [255, 255, 255, 70],
+          lineWidthMinPixels: 0.35,
+          lineWidthMaxPixels: 2.5,
+          getLineWidth: f => (f.properties?.has_car ? 2 : 0.55),
+          getFillColor: f =>
+            f.properties?.has_car ? [0, 210, 165, 92] : [16, 31, 48, 16],
+          getLineColor: f =>
+            f.properties?.has_car ? [0, 255, 190, 225] : [130, 170, 205, 48]
+        })
+      : null;
+    const peopleGrid = peopleGridData
+      ? new GeoJsonLayer({
+          id: `${policy.id}-people-grid`,
+          data: peopleGridData,
+          stroked: true,
+          filled: true,
+          pickable: true,
+          autoHighlight: true,
+          highlightColor: [255, 255, 255, 65],
+          lineWidthMinPixels: 0.65,
+          getLineWidth: f => (f.properties?.has_people ? 3 : 0.45),
+          getFillColor: f => {
+            const p = f.properties ?? {};
+            if (p.has_pickup && p.has_dropoff) return PEOPLE_GRID_BOTH_FILL;
+            if (p.has_pickup) return PICKUP_BLUE_FILL;
+            if (p.has_dropoff) return DESTINATION_RED_FILL;
+            return PEOPLE_GRID_EMPTY_FILL;
+          },
+          getLineColor: f => {
+            const p = f.properties ?? {};
+            if (p.has_pickup && p.has_dropoff) return PEOPLE_GRID_BOTH_LINE;
+            if (p.has_pickup) return PICKUP_BLUE;
+            if (p.has_dropoff) return DESTINATION_RED;
+            return PEOPLE_GRID_EMPTY_LINE;
+          }
         })
       : null;
     const routeCasing = new GeoJsonLayer({
@@ -516,8 +754,8 @@ function MapPanel({policy, world, network, snapshot, routeIndex, clockMinute, st
           pickable: false
         })
       : null;
-    return [roads, surgeArea, routeCasing, routes, people, carLayer, surgeCore].filter(Boolean);
-  }, [network, policy, snapshot, routeIndex, clockMinute, stepMinutes, cars, currentHour, event]);
+    return [roads, carGrid, peopleGrid, surgeArea, routeCasing, routes, people, carLayer, surgeCore].filter(Boolean);
+  }, [network, grid, carGridData, peopleGridData, policy, snapshot, routeIndex, clockMinute, stepMinutes, cars, currentHour, event]);
 
   return (
     <section style={{position: "relative", height, minHeight: height, overflow: "hidden"}}>
@@ -538,6 +776,14 @@ function MapPanel({policy, world, network, snapshot, routeIndex, clockMinute, st
           if (layer.id.endsWith("-people")) {
             const p = object.properties ?? {};
             return {text: `${p.kind}\nperson: ${p.person_id}\nstatus: ${p.status}`};
+          }
+          if (layer.id.endsWith("-car-grid")) {
+            const p = object.properties ?? {};
+            return {text: `grid cell [${p.row}, ${p.col}]\ncars: ${p.car_count ?? 0}\nactive: ${p.active_count ?? 0}\nidle: ${p.idle_count ?? 0}\nrepositioning: ${p.repositioning_count ?? 0}\nintersection nodes: ${p.intersection_count ?? 0}`};
+          }
+          if (layer.id.endsWith("-people-grid")) {
+            const p = object.properties ?? {};
+            return {text: `grid cell [${p.row}, ${p.col}]\npickups: ${p.pickup_count ?? 0}\ndestinations: ${p.dropoff_count ?? 0}`};
           }
           return null;
         }}
@@ -643,12 +889,15 @@ function useComparisonData() {
     let cancelled = false;
     async function load() {
       try {
-        const [greedyWorld, rlWorld, network] = await Promise.all([
+        const [greedyWorld, rlWorld, network, grid, nodeData] = await Promise.all([
           fetchJson(["/data/mobility_world.json"]),
           fetchJson(["/data/mobility_orchestrator_world.json"]),
-          fetchJson(["/data/osmnx_edges.geojson", "/dist/data/osmnx_edges.geojson"])
+          fetchJson(["/data/osmnx_edges.geojson", "/dist/data/osmnx_edges.geojson"]),
+          fetchJson(["/data/population_density_grid.json", "/dist/data/population_density_grid.json"]),
+          fetchJson(["/data/ppo_nodes.json", "/dist/data/ppo_nodes.json"])
         ]);
-        if (!cancelled) setState({status: "ready", greedyWorld, rlWorld, network});
+        const nodes = Array.isArray(nodeData?.nodes) ? nodeData.nodes : Array.isArray(nodeData) ? nodeData : [];
+        if (!cancelled) setState({status: "ready", greedyWorld, rlWorld, network, grid, nodes});
       } catch (error) {
         console.error(error);
         if (!cancelled) setState({status: "error", error});
@@ -871,6 +1120,8 @@ function ComparisonShell({compare}) {
             policy={GREEDY}
             world={data.greedyWorld}
             network={data.network}
+            grid={data.grid}
+            nodes={data.nodes}
             snapshot={greedySnapshot}
             routeIndex={data.greedyWorld.routes}
             clockMinute={clockMinute}
@@ -884,6 +1135,8 @@ function ComparisonShell({compare}) {
             policy={RL}
             world={data.rlWorld}
             network={data.network}
+            grid={data.grid}
+            nodes={data.nodes}
             snapshot={rlSnapshot}
             routeIndex={data.rlWorld.routes}
             clockMinute={clockMinute}
@@ -899,6 +1152,8 @@ function ComparisonShell({compare}) {
           policy={RL}
           world={data.rlWorld}
           network={data.network}
+          grid={data.grid}
+          nodes={data.nodes}
           snapshot={rlSnapshot}
           routeIndex={data.rlWorld.routes}
           clockMinute={clockMinute}
