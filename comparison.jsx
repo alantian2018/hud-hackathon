@@ -1,4 +1,4 @@
-import React, {useEffect, useMemo, useState} from "react";
+import React, {useEffect, useMemo, useRef, useState} from "react";
 import {createRoot} from "react-dom/client";
 import DeckGL from "@deck.gl/react";
 import {GeoJsonLayer, ScatterplotLayer} from "@deck.gl/layers";
@@ -1305,7 +1305,7 @@ function MapLegend() {
 }
 
 function AgentTracePanel({snapshot, finalSnapshot, world, event, clockMinute, done}) {
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(true);
   const scenario = traceScenarioForEvent(event);
   const rows = useMemo(
     () => buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinute, done}),
@@ -1858,6 +1858,7 @@ function ComparisonShell({mode}) {
   const [activeEventId, setActiveEventId] = useState(null);
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
   const [impactDismissed, setImpactDismissed] = useState(false);
+  const autoStartedRef = useRef(false);
 
   const events = useMemo(
     () => eventChoices(data.greedyWorld, data.rlWorld),
@@ -1894,6 +1895,17 @@ function ComparisonShell({mode}) {
     }, 80);
     return () => clearInterval(timer);
   }, [running, speed, endMinute]);
+
+  useEffect(() => {
+    if (mode !== "compare" || data.status !== "ready" || autoStartedRef.current) return undefined;
+    autoStartedRef.current = true;
+    const timer = setTimeout(() => {
+      setClockMinute(current => current >= endMinute - 0.01 ? PRE_FRAME_MINUTE : current);
+      setImpactDismissed(false);
+      setRunning(true);
+    }, 2400);
+    return () => clearTimeout(timer);
+  }, [mode, data.status, endMinute]);
 
   useEffect(() => {
     if (!activeEventId) return;
