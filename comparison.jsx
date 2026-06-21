@@ -884,11 +884,18 @@ function buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinut
   ];
 
   if (snapshot?.is_pre_frame || clockMinute < 0) {
-    rows.push({
-      tool: "mobility_tools.list_scenarios",
-      call: "list_scenarios()",
-      output: "Base, Chase Exit, Market Surge, FiDi Surge available; waiting for Start Both"
-    });
+    rows.push(
+      {
+        tool: "mobility_tools.list_scenarios",
+        call: "list_scenarios()",
+        output: "Base, Chase Exit, Market Surge, FiDi Surge available; waiting for Start Both"
+      },
+      {
+        tool: "mobility_tools.propose_full_plan",
+        call: "propose_full_plan(episode_id)",
+        output: `candidate_plan={assignments:0, repositions:0, holds:${fleetSize}}; goal=${scenario.agentChallenge}`
+      }
+    );
     return rows;
   }
 
