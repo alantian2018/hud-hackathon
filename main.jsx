@@ -28,9 +28,7 @@ const DOWNTOWN_CONGESTION_CENTERS = [
   {longitude: -122.419, latitude: 37.775, weight: 0.85} // Civic / Mission corridor
 ];
 const COMMUTE_CORE = {longitude: -122.407, latitude: 37.787};
-const SPEED_MIN = 0.1;
-const SPEED_MAX = 30;
-const SPEED_STEP = 0.1;
+const SIM_SPEED_STEPS = [0.1, 0.5, 1, 4, 12, 30];
 const TIME_PRESETS = [
   {label: "02:00", minute: 2 * 60},
   {label: "08:00", minute: 8 * 60},
@@ -328,6 +326,12 @@ function commuteWaveIntensity(feature, hour) {
 function formatSpeed(value) {
   const speed = Number(value) || 0;
   return speed < 1 ? speed.toFixed(1) : speed.toFixed(speed % 1 === 0 ? 0 : 1);
+}
+
+function nextSimSpeed(current) {
+  const idx = SIM_SPEED_STEPS.findIndex(speed => Math.abs(speed - current) < 0.001);
+  if (idx < 0) return SIM_SPEED_STEPS[0];
+  return SIM_SPEED_STEPS[(idx + 1) % SIM_SPEED_STEPS.length];
 }
 
 function trafficFlowSpeedFactor(hour) {
@@ -989,7 +993,7 @@ function snapshotWaitTimeMinutes(snapshot) {
 
 function App() {
   const [clockMinute, setClockMinute] = useState(7 * 60);
-  const [simSpeed, setSimSpeed] = useState(1);
+  const [simSpeed, setSimSpeed] = useState(0.1);
   const [paused, setPaused] = useState(false);
   const [keyMissing, setKeyMissing] = useState(MAPTILER_KEY === "YOUR_MAPTILER_KEY");
   const [network, setNetwork] = useState(null);
@@ -1787,29 +1791,13 @@ function App() {
           People Grid: {showPeopleGrid ? "ON" : "OFF"}
         </button>
 
-        <label
-          style={{
-            ...controlButtonStyle,
-            display: "flex",
-            alignItems: "center",
-            gap: 9,
-            minWidth: 210
-          }}
+        <button
+          type="button"
+          onClick={() => setSimSpeed(s => nextSimSpeed(s))}
+          style={controlButtonStyle}
         >
-          <span style={{whiteSpace: "nowrap"}}>Speed: x{formatSpeed(simSpeed)}</span>
-          <input
-            type="range"
-            min={SPEED_MIN}
-            max={SPEED_MAX}
-            step={SPEED_STEP}
-            value={simSpeed}
-            onChange={event => setSimSpeed(Number(event.target.value))}
-            style={{
-              width: 112,
-              accentColor: "#7dd3fc"
-            }}
-          />
-        </label>
+          Speed: x{formatSpeed(simSpeed)}
+        </button>
 
         <button
           type="button"

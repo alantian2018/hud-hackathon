@@ -34,7 +34,7 @@ The MapTiler key currently lives at the top of `main.jsx` as `MAPTILER_KEY`. Rep
 - `Cars Grid`: shows vehicle occupancy by grid cell.
 - `People Grid`: shows pickup cells in blue and destination cells in red.
 - `Greedy`: enables the stateful greedy dispatch simulation.
-- `Speed`: changes simulated playback speed from `0.1x` up to fast-forward.
+- `Speed`: cycles simulated playback speed through `0.1x`, `0.5x`, and faster demo speeds.
 - Time presets jump the simulation to morning, midday, evening rush, or night.
 
 ## Regenerate Simulation Data
