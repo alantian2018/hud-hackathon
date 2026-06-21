@@ -47,6 +47,44 @@ const PEOPLE_GRID_EMPTY_FILL = [18, 34, 52, 0];
 const PEOPLE_GRID_EMPTY_LINE = [138, 180, 248, 34];
 const PEOPLE_GRID_BOTH_FILL = [168, 85, 247, 155];
 const PEOPLE_GRID_BOTH_LINE = [216, 180, 254, 230];
+const TRACE_SCENARIOS = {
+  base: {
+    id: "base",
+    eventId: null,
+    label: "Base",
+    stress: "citywide baseline demand",
+    failureMode: "reactive local matching can leave future hotspots uncovered",
+    agentChallenge: "balance immediate trips with forecast supply coverage",
+    override: "stage idle supply near forecast hotspots while accepting high-value nearby trips"
+  },
+  chase_center_exit: {
+    id: "chase_center_exit",
+    eventId: "chase_center_exit",
+    label: "Chase Exit",
+    stress: "stadium demand surge",
+    failureMode: "overconcentration near the venue exit",
+    agentChallenge: "stage vehicles around lower-traffic pickup corridors",
+    override: "redirect part of the fleet toward perimeter cells instead of stacking every car at the exit"
+  },
+  market_st_surge: {
+    id: "market_st_surge",
+    eventId: "market_st_surge",
+    label: "Market Surge",
+    stress: "downtown demand spike",
+    failureMode: "cars chase central demand and clog the same corridor",
+    agentChallenge: "balance coverage across surrounding Market Street zones",
+    override: "split assignments between central pickups and adjacent cells with lower traffic pressure"
+  },
+  fidi_conference: {
+    id: "fidi_conference",
+    eventId: "fidi_conference",
+    label: "FiDi Surge",
+    stress: "business district exit wave",
+    failureMode: "undersupply at nearby pickup zones",
+    agentChallenge: "reposition before requests expire",
+    override: "pre-position idle vehicles near conference-adjacent cells before the request queue peaks"
+  }
+};
 const FEATURE_GRID_CELLS_CACHE = new WeakMap();
 
 function buildStyleUrl() {
@@ -731,6 +769,139 @@ function avgWaitMinutes(stats) {
   return Number(stats?.wait_time_min ?? 0) / Math.max(1, completed, servedByPct);
 }
 
+function traceScenarioForEvent(event) {
+  if (!event?.id) return TRACE_SCENARIOS.base;
+  return TRACE_SCENARIOS[event.id] ?? {
+    id: event.id,
+    eventId: event.id,
+    label: event.short_label ?? event.label ?? event.id,
+    stress: event.description ?? "custom demand stress",
+    failureMode: "localized demand pressure can pull the fleet into one pocket",
+    agentChallenge: "keep immediate service and future coverage in balance",
+    override: "adjust assignments and repositions around forecast demand and traffic pressure"
+  };
+}
+
+function cellLabel(cell) {
+  if (!cell) return "none";
+  const row = Array.isArray(cell) ? cell[0] : cell.row;
+  const col = Array.isArray(cell) ? cell[1] : cell.col;
+  if (!Number.isFinite(Number(row)) || !Number.isFinite(Number(col))) return "none";
+  return `[${Number(row)}, ${Number(col)}]`;
+}
+
+function valueLabel(value) {
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric.toFixed(2) : "0.00";
+}
+
+function topCellsLabel(cells, limit = 3) {
+  const items = (cells ?? []).slice(0, limit);
+  if (!items.length) return "none";
+  return items.map(cell => `${cellLabel(cell)}:${valueLabel(cell.value)}`).join("  ");
+}
+
+function sampleAssignments(snapshot, limit = 2) {
+  const assignments =
+    snapshot?.map_dispatch?.new_assignments?.length
+      ? snapshot.map_dispatch.new_assignments
+      : snapshot?.map_dispatch?.assignments ?? [];
+  const sample = assignments.slice(0, limit).map(item => `${item.car_id}->${item.person_id}`);
+  return sample.length ? sample.join(", ") : "none";
+}
+
+function sampleRepositions(snapshot, limit = 2) {
+  const repositions =
+    snapshot?.map_dispatch?.new_repositions?.length
+      ? snapshot.map_dispatch.new_repositions
+      : snapshot?.map_dispatch?.repositions ?? [];
+  const sample = repositions
+    .slice(0, limit)
+    .map(item => `${item.car_id}->${cellLabel(item.target_grid_cell)}`);
+  return sample.length ? sample.join(", ") : "none";
+}
+
+function maxHeatValue(cells) {
+  return (cells ?? []).reduce((max, cell) => Math.max(max, Number(cell.value) || 0), 0);
+}
+
+function buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinute, stepMinutes, done}) {
+  const summary = snapshot?.summary ?? {};
+  const dispatch = summary.dispatch ?? snapshot?.map_dispatch?.summary ?? zeroDispatchSummary();
+  const stats = metricsFor(snapshot, "rl");
+  const finalStats = metricsFor(finalSnapshot, "rl");
+  const fleetSize = Number(world?.fleet_size ?? 40);
+  const activeCars = Number(dispatch.num_active_cars ?? stats.active_cars ?? 0);
+  const repositions = Number(dispatch.num_new_repositions ?? dispatch.num_repositions ?? 0);
+  const assignments = Number(dispatch.num_new_assignments ?? dispatch.num_assignments ?? 0);
+  const holds = Math.max(0, fleetSize - activeCars);
+  const newRequests = Number(summary.num_new_people ?? snapshot?.new_people?.length ?? 0);
+  const topDemand = summary.top_demand_cells ?? [];
+  const traffic = summary.traffic_bottlenecks ?? [];
+  const eventArg = scenario.eventId ? `"${scenario.eventId}"` : "null";
+  const stepLabel = snapshot?.is_pre_frame || clockMinute < 0 ? "pre-frame" : formatClock(clockMinute);
+
+  const rows = [
+    {
+      tool: "mobility_tools.create_episode",
+      call: `create_episode(event_id=${eventArg}, fleet_size=${fleetSize}, step_minutes=${stepMinutes})`,
+      output: `scenario=${scenario.label}; stress=${scenario.stress}`
+    },
+    {
+      tool: "mobility_tools.observe_state",
+      call: "observe_state(episode_id)",
+      output: `t=${stepLabel}; requests=${newRequests}; active=${activeCars}; idle_or_held=${holds}; unassigned=${dispatch.num_unassigned_people ?? 0}`
+    }
+  ];
+
+  if (snapshot?.is_pre_frame || clockMinute < 0) {
+    rows.push({
+      tool: "mobility_tools.list_scenarios",
+      call: "list_scenarios()",
+      output: "Base, Chase Exit, Market Surge, FiDi Surge available; waiting for Start Both"
+    });
+    return rows;
+  }
+
+  rows.push(
+    {
+      tool: "mobility_tools.forecast_hotspots",
+      call: "forecast_hotspots(episode_id, lookahead_steps=3, k=8)",
+      output: `hotspots=${topCellsLabel(topDemand)}; traffic=${topCellsLabel(traffic, 2)}`
+    },
+    {
+      tool: "mobility_tools.propose_matching",
+      call: "propose_matching(episode_id)",
+      output: `${assignments} new assignments; sample=${sampleAssignments(snapshot)}`
+    },
+    {
+      tool: "mobility_tools.propose_repositioning",
+      call: "propose_repositioning(episode_id, assigned_car_ids_json=[...])",
+      output: `${repositions} new repositions; sample=${sampleRepositions(snapshot)}`
+    },
+    {
+      tool: "mobility_tools.critique_action_plan",
+      call: "critique_action_plan(episode_id, plan_json={...})",
+      output: `${scenario.failureMode}; max traffic pressure=${valueLabel(maxHeatValue(traffic))}; override=${scenario.override}`
+    },
+    {
+      tool: "mobility_tools.step_world",
+      call: "step_world(episode_id, plan_json={assignments,repositions,holds})",
+      output: `applied_plan_counts={assignments:${assignments}, repositions:${repositions}, holds:${holds}}; demand_served=${formatPct(stats.demand_served_pct)}; avg_wait=${avgWaitMinutes(stats).toFixed(1)}m`
+    }
+  );
+
+  if (done) {
+    rows.push({
+      tool: "mobility_tools.submit_episode",
+      call: "submit_episode(episode_id)",
+      output: `completed=${Number(finalStats.completed_trips ?? 0).toLocaleString()}; profit=${formatMoney(finalStats.revenue)}; demand_served=${formatPct(finalStats.demand_served_pct)}; avg_wait=${avgWaitMinutes(finalStats).toFixed(1)}m`
+    });
+  }
+
+  return rows;
+}
+
 function metricDelta(rl, greedy, key, lowerIsBetter = false) {
   const a = Number(rl?.[key] ?? 0);
   const b = Number(greedy?.[key] ?? 0);
@@ -1059,6 +1230,159 @@ function MapLegend() {
       <LegendBadge label="End" swatch={<DotSwatch fill="#ea4335" />} />
       <LegendBadge label="Trip route" swatch={<LineSwatch color="#4285f4" />} />
       <LegendBadge label="Reposition" swatch={<LineSwatch color="#14b8a6" />} />
+    </div>
+  );
+}
+
+function AgentTracePanel({snapshot, finalSnapshot, world, event, clockMinute, stepMinutes, done}) {
+  const [open, setOpen] = useState(false);
+  const scenario = traceScenarioForEvent(event);
+  const rows = useMemo(
+    () => buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinute, stepMinutes, done}),
+    [snapshot, finalSnapshot, world, scenario, clockMinute, stepMinutes, done]
+  );
+
+  return (
+    <aside style={{
+      position: "absolute",
+      zIndex: 16,
+      right: 12,
+      bottom: 12,
+      width: open ? "min(440px, calc(100vw - 24px))" : "min(292px, calc(100vw - 24px))",
+      borderRadius: 8,
+      background: "rgba(4,8,14,0.9)",
+      color: "white",
+      border: "1px solid rgba(125,211,252,0.28)",
+      boxShadow: "0 18px 52px rgba(0,0,0,0.42)",
+      backdropFilter: "blur(12px)",
+      fontFamily: "system-ui, sans-serif",
+      overflow: "hidden"
+    }}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen(value => !value)}
+        style={{
+          width: "100%",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 10,
+          padding: "10px 11px",
+          border: 0,
+          borderBottom: open ? "1px solid rgba(148,163,184,0.16)" : 0,
+          background: "linear-gradient(90deg, rgba(14,165,233,0.14), rgba(20,184,166,0.08))",
+          color: "white",
+          cursor: "pointer",
+          font: "inherit",
+          textAlign: "left"
+        }}
+      >
+        <span style={{display: "flex", flexDirection: "column", gap: 2, minWidth: 0}}>
+          <span style={{fontSize: 13, fontWeight: 900, lineHeight: 1.1}}>HUD LLM Tool Trace</span>
+          <span style={{fontSize: 11, color: "rgba(226,232,240,0.66)", fontWeight: 720, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap"}}>
+            {scenario.label} · {formatClock(clockMinute)}
+          </span>
+        </span>
+        <span style={{
+          flex: "0 0 auto",
+          padding: "5px 8px",
+          borderRadius: 999,
+          background: open ? "rgba(125,211,252,0.16)" : "rgba(148,163,184,0.12)",
+          border: "1px solid rgba(226,232,240,0.16)",
+          color: open ? "#bae6fd" : "rgba(226,232,240,0.82)",
+          fontSize: 11,
+          fontWeight: 850
+        }}>
+          {open ? "Hide" : "Show"}
+        </span>
+      </button>
+      {open && (
+        <div style={{padding: 11}}>
+          <div style={{
+            display: "grid",
+            gridTemplateColumns: "1fr",
+            gap: 8,
+            maxHeight: "min(48vh, 420px)",
+            overflowY: "auto",
+            paddingRight: 2
+          }}>
+            <TraceSummary scenario={scenario} />
+            {rows.map((row, index) => (
+              <TraceRow key={`${row.tool}-${index}`} row={row} index={index + 1} />
+            ))}
+          </div>
+        </div>
+      )}
+    </aside>
+  );
+}
+
+function TraceSummary({scenario}) {
+  return (
+    <div style={{
+      padding: "9px 10px",
+      borderRadius: 7,
+      background: "rgba(15,23,42,0.72)",
+      border: "1px solid rgba(148,163,184,0.16)"
+    }}>
+      <div style={{fontSize: 11, color: "rgba(226,232,240,0.58)", fontWeight: 850, textTransform: "uppercase", letterSpacing: 0}}>
+        Scenario
+      </div>
+      <div style={{fontSize: 13, fontWeight: 850, marginTop: 4}}>{scenario.label}</div>
+      <div style={{fontSize: 12, color: "rgba(226,232,240,0.72)", marginTop: 5, lineHeight: 1.35}}>
+        {scenario.agentChallenge}
+      </div>
+    </div>
+  );
+}
+
+function TraceRow({row, index}) {
+  return (
+    <div style={{
+      display: "grid",
+      gridTemplateColumns: "22px minmax(0, 1fr)",
+      gap: 8,
+      padding: "9px 10px",
+      borderRadius: 7,
+      background: "rgba(15,23,42,0.62)",
+      border: "1px solid rgba(148,163,184,0.14)"
+    }}>
+      <div style={{
+        width: 22,
+        height: 22,
+        borderRadius: 999,
+        display: "grid",
+        placeItems: "center",
+        background: "rgba(125,211,252,0.14)",
+        color: "#bae6fd",
+        fontSize: 11,
+        fontWeight: 900
+      }}>
+        {index}
+      </div>
+      <div style={{minWidth: 0}}>
+        <div style={{fontSize: 12, fontWeight: 880, color: "#e2e8f0", overflowWrap: "anywhere"}}>
+          {row.tool}
+        </div>
+        <div style={{
+          marginTop: 5,
+          padding: "6px 7px",
+          borderRadius: 6,
+          background: "rgba(2,6,23,0.78)",
+          border: "1px solid rgba(148,163,184,0.12)",
+          color: "#93c5fd",
+          fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace",
+          fontSize: 11,
+          lineHeight: 1.35,
+          overflowWrap: "anywhere"
+        }}>
+          {row.call}
+        </div>
+        <div style={{fontSize: 12, color: "rgba(226,232,240,0.72)", marginTop: 6, lineHeight: 1.35}}>
+          {row.output}
+        </div>
+      </div>
     </div>
   );
 }
@@ -1519,7 +1843,8 @@ function ComparisonShell({compare}) {
   const rlSnapshot = snapshotAt(rlSnapshots, clockMinute);
   const finalGreedySnapshot = greedySnapshots.at(-1);
   const finalRlSnapshot = rlSnapshots.at(-1);
-  const showBusinessImpact = compare && clockMinute >= endMinute - 0.01;
+  const isAtEnd = clockMinute >= endMinute - 0.01;
+  const showBusinessImpact = compare && isAtEnd;
   const onStart = () => {
     if (clockMinute >= endMinute - 0.01) setClockMinute(PRE_FRAME_MINUTE);
     setRunning(true);
@@ -1602,6 +1927,15 @@ function ComparisonShell({compare}) {
         />
       )}
       <MapLegend />
+      <AgentTracePanel
+        snapshot={rlSnapshot}
+        finalSnapshot={finalRlSnapshot}
+        world={data.rlWorld}
+        event={activeEvent}
+        clockMinute={clockMinute}
+        stepMinutes={rlStep}
+        done={isAtEnd}
+      />
       <BusinessImpactOverlay
         greedySnapshot={finalGreedySnapshot}
         rlSnapshot={finalRlSnapshot}
