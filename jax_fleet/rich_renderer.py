@@ -8,6 +8,14 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 
 
+_STATUS_COLORS = {
+    "decision": "#475569",
+    "repositioning": "#16a34a",
+    "to_pickup": "#2563eb",
+    "to_dropoff": "#dc2626",
+}
+
+
 @dataclass(frozen=True)
 class RenderConfig:
     width: int = 1280
@@ -145,6 +153,7 @@ def _compose_scene_array(
     draw = ImageDraw.Draw(canvas, "RGBA")
     map_box, hud_box = _layout_boxes(config)
     mapper = _CoordinateMapper(scene, map_box)
+    route_preview_count = _draw_route_previews(draw, scene, mapper, scale)
     _draw_edge_progress(draw, scene, mapper, scale)
     _draw_requests(draw, scene, mapper, scale)
     _draw_cars(draw, scene, mapper, scale)
@@ -157,6 +166,7 @@ def _compose_scene_array(
         "hud_lines": hud_lines,
         "map_box": tuple(int(v / scale) for v in map_box),
         "hud_box": tuple(int(v / scale) for v in hud_box),
+        "route_preview_count": route_preview_count,
     }
     if return_metadata:
         return frame, metadata
@@ -284,7 +294,37 @@ def _draw_edge_progress(
         end = mapper.xy(progress.get("to"))
         if start is None or end is None:
             continue
-        draw.line([start, end], fill=(15, 23, 42, 190), width=max(2, 3 * scale))
+        color = _status_rgba(str(progress.get("status", "")), alpha=225)
+        draw.line([start, end], fill=color, width=max(2, 3 * scale))
+
+
+def _draw_route_previews(
+    draw: ImageDraw.ImageDraw,
+    scene: dict[str, Any],
+    mapper: _CoordinateMapper,
+    scale: int,
+) -> int:
+    drawn = 0
+    for preview in scene.get("route_previews", []):
+        status = str(preview.get("status", ""))
+        if status not in {"to_pickup", "to_dropoff"}:
+            continue
+        points = [mapper.xy(point) for point in preview.get("points", [])]
+        xy = [point for point in points if point is not None]
+        if len(xy) < 2:
+            continue
+        draw.line(xy, fill=_status_rgba(status, alpha=70), width=max(6, 8 * scale), joint="curve")
+        draw.line(xy, fill=_status_rgba(status, alpha=230), width=max(2, 3 * scale), joint="curve")
+        end = xy[-1]
+        radius = 5 * scale
+        draw.ellipse(
+            (end[0] - radius, end[1] - radius, end[0] + radius, end[1] + radius),
+            fill=_status_rgba(status, alpha=245),
+            outline=(255, 255, 255, 235),
+            width=max(1, scale),
+        )
+        drawn += 1
+    return drawn
 
 
 def _draw_requests(
@@ -316,19 +356,13 @@ def _draw_cars(
     scale: int,
 ) -> None:
     font = _font(12 * scale, bold=True)
-    colors = {
-        "decision": "#2563eb",
-        "repositioning": "#16a34a",
-        "to_pickup": "#f97316",
-        "to_dropoff": "#9333ea",
-    }
     for car in scene.get("cars", []):
         xy = mapper.xy(car.get("position"))
         if xy is None:
             continue
         x, y = xy
         radius = 9 * scale
-        fill = colors.get(car.get("status"), "#475569")
+        fill = _status_color(str(car.get("status", "")))
         _ellipse(draw, (x, y), radius, fill=fill, outline="#ffffff", width=max(2, scale))
         label = str(car.get("id", "?"))
         bbox = draw.textbbox((0, 0), label, font=font)
@@ -467,6 +501,8 @@ def _scene_bounds(scene: dict[str, Any]) -> tuple[float, float, float, float]:
                 points.append(request["origin"])
             if request.get("destination") is not None:
                 points.append(request["destination"])
+        for preview in scene.get("route_previews", []):
+            points.extend(point for point in preview.get("points", []) if point is not None)
         if not points:
             points = [[0.0, 0.0], [1.0, 1.0]]
         values = np.asarray(points, dtype=np.float64)
@@ -484,6 +520,15 @@ def _congestion_rgba(value: float, *, alpha: int) -> tuple[int, int, int, int]:
     else:
         rgb = _mix((234, 179, 8), (220, 38, 38), min(1.0, (value - 1.25) / 1.25))
     return (*rgb, alpha)
+
+
+def _status_color(status: str) -> str:
+    return _STATUS_COLORS.get(status, "#475569")
+
+
+def _status_rgba(status: str, *, alpha: int) -> tuple[int, int, int, int]:
+    value = _status_color(status).lstrip("#")
+    return (int(value[0:2], 16), int(value[2:4], 16), int(value[4:6], 16), int(alpha))
 
 
 def _mix(a: tuple[int, int, int], b: tuple[int, int, int], t: float) -> tuple[int, int, int]:

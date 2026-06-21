@@ -79,18 +79,30 @@ def export_scene(
                 {
                     "car_id": int(car_id),
                     "edge_id": int(np.asarray(state.car_edge_ids)[car_id]),
+                    "status": CAR_STATUS_LABELS.get(status, "unknown"),
                     "progress": progress,
                     "from": node_lonlat[node].tolist(),
                     "to": node_lonlat[int(np.asarray(state.car_target_nodes)[car_id])].tolist(),
                 }
             )
             goal = int(np.asarray(state.car_goal_nodes)[car_id])
-            if include_route_previews and 0 <= goal < graph.num_nodes:
+            if include_route_previews and status in {CAR_TO_PICKUP, CAR_TO_DROPOFF} and 0 <= goal < graph.num_nodes:
+                edge_ids = shortest_path_edges(graph, node, goal)
                 route_previews.append(
                     {
                         "car_id": int(car_id),
+                        "status": CAR_STATUS_LABELS.get(status, "unknown"),
+                        "request_id": int(np.asarray(state.car_request_ids)[car_id]),
                         "goal_node_id": int(original_ids[goal]),
-                        "edge_ids": shortest_path_edges(graph, node, goal),
+                        "goal_compact_node_id": goal,
+                        "edge_ids": edge_ids,
+                        "points": _route_preview_points(
+                            node_lonlat=node_lonlat,
+                            edge_targets=np.asarray(graph.edge_targets),
+                            edge_ids=edge_ids,
+                            position=position,
+                            goal=goal,
+                        ),
                     }
                 )
 
@@ -213,6 +225,27 @@ def _nullable_float(value) -> float | None:
     if np.isnan(value):
         return None
     return value
+
+
+def _route_preview_points(
+    *,
+    node_lonlat: np.ndarray,
+    edge_targets: np.ndarray,
+    edge_ids: list[int],
+    position: list[float],
+    goal: int,
+) -> list[list[float]]:
+    points = [list(position)]
+    for edge_id in edge_ids:
+        target = int(edge_targets[int(edge_id)])
+        next_point = node_lonlat[target].tolist()
+        if next_point != points[-1]:
+            points.append(next_point)
+    if len(points) == 1 and 0 <= goal < len(node_lonlat):
+        goal_point = node_lonlat[goal].tolist()
+        if goal_point != points[-1]:
+            points.append(goal_point)
+    return points
 
 
 def _node_id_or_none(original_ids: np.ndarray, value) -> int | None:
