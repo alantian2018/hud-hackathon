@@ -1,5 +1,7 @@
 # FleetForge Demo
 
+![FleetForge demo](assets/fleetforge.gif)
+
 FleetForge is a HUD-trained fleet orchestration environment for comparing a reactive greedy dispatcher against an Agentic RL Fleet on the same San Francisco road network, vehicle supply, demand stream, and event stress tests.
 
 The core question is simple: can an agentic fleet controller serve more demand with lower passenger wait time than a nearest-car style greedy policy?
