@@ -30,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--max-requests", default=16, type=int)
     train_parser.add_argument("--episode-seconds", default=3600.0, type=float)
     train_parser.add_argument("--spawn-rate-per-minute", default=0.0, type=float)
-    train_parser.add_argument("--spawn-source", choices=["uniform", "js-visual"], default=None)
+    train_parser.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
     train_parser.add_argument("--learning-rate", default=3e-4, type=float)
     train_parser.add_argument("--checkpoint-dir", default="runs/jax_fleet/checkpoints")
     train_parser.add_argument("--checkpoint-every", default=1, type=int)
@@ -49,7 +49,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--max-requests", default=16, type=int)
     benchmark.add_argument("--episode-seconds", default=3600.0, type=float)
     benchmark.add_argument("--spawn-rate-per-minute", default=0.0, type=float)
-    benchmark.add_argument("--spawn-source", choices=["uniform", "js-visual"], default=None)
+    benchmark.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
     return parser
 
 

@@ -169,10 +169,10 @@ def main(argv: list[str] | None = None) -> int:
 
     graph = _load_graph(args.graph, data_dir=args.data_dir, cache_dir=args.cache_dir)
     render_width, render_height = _render_size(args.width, args.height, fullscreen=args.fullscreen)
-    spawn_source = args.spawn_source or ("js-visual" if args.graph == "sf" else "uniform")
+    spawn_source = args.spawn_source or ("density" if args.graph == "sf" else "uniform")
     initial_nodes = (
         None
-        if spawn_source == "js-visual"
+        if spawn_source in {"js-visual", "density"}
         else _initial_car_nodes(graph.num_nodes, args.max_cars, args.seed)
     )
     params = make_spawned_env_params(
@@ -250,7 +250,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--max-cars", type=int, default=40)
     parser.add_argument("--max-requests", type=int, default=32)
     parser.add_argument("--spawn-rate-per-minute", type=float, default=0.0)
-    parser.add_argument("--spawn-source", choices=["uniform", "js-visual"], default=None)
+    parser.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
     parser.add_argument("--episode-seconds", type=float, default=240.0)
     parser.add_argument("--start-time-seconds", type=float, default=7.0 * 3600.0)
     parser.add_argument("--max-steps", type=int, default=250)

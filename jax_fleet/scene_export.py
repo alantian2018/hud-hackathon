@@ -141,10 +141,15 @@ def export_scene(
         for status, label in REQUEST_STATUS_LABELS.items()
         if status != REQUEST_EMPTY
     }
+    active_requests = int(
+        np.isin(request_status, [REQUEST_QUEUED, REQUEST_ASSIGNED, REQUEST_ONBOARD]).sum()
+    )
     metrics = {
         "completed_requests": int(np.asarray(state.metrics.completed_requests)),
         "dropped_requests": int(np.asarray(state.metrics.dropped_requests)),
         "queued_requests": int(np.asarray(state.metrics.queued_requests)),
+        "active_requests": active_requests,
+        "target_active_requests": int(params.target_active_requests),
         "invalid_actions": int(np.asarray(state.metrics.invalid_actions)),
         "pickup_wait_seconds": float(np.asarray(state.metrics.pickup_wait_seconds)),
     }

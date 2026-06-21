@@ -40,10 +40,17 @@ class EnvParams:
     max_requests: int = struct.field(pytree_node=False)
     raster_size: int = struct.field(pytree_node=False, default=50)
     max_event_steps: int = struct.field(pytree_node=False, default=512)
+    target_active_requests: int = struct.field(pytree_node=False, default=0)
     initial_car_nodes: Array = struct.field(default_factory=lambda: jnp.zeros((1,), jnp.int32))
     start_time_seconds: Array = struct.field(default_factory=lambda: jnp.asarray(0.0, jnp.float32))
     episode_seconds: Array = struct.field(default_factory=lambda: jnp.asarray(3600.0, jnp.float32))
     spawn_rate_per_minute: Array = struct.field(default_factory=lambda: jnp.asarray(0.0, jnp.float32))
+    density_spawn_patience_seconds: Array = struct.field(
+        default_factory=lambda: jnp.asarray(jnp.inf, jnp.float32)
+    )
+    density_destination_time_shift_seconds: Array = struct.field(
+        default_factory=lambda: jnp.asarray(2.0 * 3600.0, jnp.float32)
+    )
     wait_time_scale: Array = struct.field(default_factory=lambda: jnp.asarray(1.0 / 60.0, jnp.float32))
     gamma: Array = struct.field(default_factory=lambda: jnp.asarray(0.99, jnp.float32))
     discount_time_unit_seconds: Array = struct.field(
@@ -53,6 +60,7 @@ class EnvParams:
     preplanned_origin_nodes: Array = struct.field(default_factory=lambda: jnp.zeros((0,), jnp.int32))
     preplanned_dest_nodes: Array = struct.field(default_factory=lambda: jnp.zeros((0,), jnp.int32))
     preplanned_deadline_times: Array = struct.field(default_factory=lambda: jnp.zeros((0,), jnp.float32))
+    node_density_by_hour: Array = struct.field(default_factory=lambda: jnp.ones((24, 1), jnp.float32))
     edge_raster_by_hour: Array = struct.field(default_factory=lambda: jnp.zeros((24, 1, 1), jnp.float32))
 
 

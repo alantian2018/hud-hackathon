@@ -164,8 +164,18 @@ def make_spawned_env_params(
     spawn_rate_per_minute: float = 0.0,
     **env_kwargs: Any,
 ) -> EnvParams:
-    source = spawn_source or ("js-visual" if graph_name == "sf" else "uniform")
+    source = spawn_source or ("density" if graph_name == "sf" else "uniform")
     preplanned_requests: list[dict[str, float | int]] | None = None
+    if source == "density":
+        if initial_car_nodes is None and graph_name == "sf":
+            initial_car_nodes = seed_initial_car_nodes_like_js(
+                data_dir,
+                graph,
+                seed=seed,
+                fleet_size=max_cars,
+            )
+        spawn_rate_per_minute = 0.0
+        env_kwargs.setdefault("target_active_request_fraction", 0.5)
     if source == "js-visual":
         if initial_car_nodes is None:
             initial_car_nodes = seed_initial_car_nodes_like_js(
@@ -196,7 +206,8 @@ def make_spawned_env_params(
             )
         ]
         spawn_rate_per_minute = 0.0
-    elif source != "uniform":
+        env_kwargs.setdefault("target_active_requests", 0)
+    elif source not in {"uniform", "density"}:
         raise ValueError(f"unknown spawn_source: {source}")
 
     return make_env_params(

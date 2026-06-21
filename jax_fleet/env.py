@@ -23,6 +23,35 @@ REQUEST_COMPLETED = 4
 REQUEST_DROPPED = 5
 
 _INF = 1.0e20
+_POPULATION_HOURLY_MULTIPLIER = np.asarray(
+    [
+        0.82,
+        0.78,
+        0.74,
+        0.72,
+        0.74,
+        0.82,
+        0.96,
+        1.10,
+        1.18,
+        1.20,
+        1.16,
+        1.10,
+        1.06,
+        1.02,
+        1.00,
+        1.04,
+        1.12,
+        1.20,
+        1.14,
+        1.04,
+        0.96,
+        0.90,
+        0.86,
+        0.84,
+    ],
+    dtype=np.float32,
+)
 
 
 def make_env_params(
@@ -35,6 +64,10 @@ def make_env_params(
     start_time_seconds: float = 0.0,
     episode_seconds: float = 3600.0,
     spawn_rate_per_minute: float = 0.0,
+    target_active_requests: int | None = None,
+    target_active_request_fraction: float = 0.0,
+    density_spawn_patience_seconds: float = np.inf,
+    density_destination_time_shift_seconds: float = 2.0 * 3600.0,
     wait_time_scale: float = 1.0 / 60.0,
     gamma: float = 0.99,
     discount_time_unit_seconds: float = 60.0,
@@ -49,6 +82,11 @@ def make_env_params(
             raise ValueError("initial_car_nodes length must match max_cars")
     if np.any(initial < 0) or np.any(initial >= graph.num_nodes):
         raise ValueError("initial_car_nodes contains ids outside the graph")
+    if target_active_requests is None:
+        target_active = int(np.floor(max_cars * float(target_active_request_fraction)))
+    else:
+        target_active = int(target_active_requests)
+    target_active = int(np.clip(target_active, 0, max_requests))
 
     scheduled = list(preplanned_requests or [])
     spawn_times = np.full((len(scheduled),), np.inf, dtype=np.float32)
@@ -74,10 +112,16 @@ def make_env_params(
         max_requests=max_requests,
         raster_size=raster_size,
         max_event_steps=max_event_steps,
+        target_active_requests=target_active,
         initial_car_nodes=jnp.asarray(initial, dtype=jnp.int32),
         start_time_seconds=jnp.asarray(start_time_seconds, dtype=jnp.float32),
         episode_seconds=jnp.asarray(episode_seconds, dtype=jnp.float32),
         spawn_rate_per_minute=jnp.asarray(spawn_rate_per_minute, dtype=jnp.float32),
+        density_spawn_patience_seconds=jnp.asarray(density_spawn_patience_seconds, dtype=jnp.float32),
+        density_destination_time_shift_seconds=jnp.asarray(
+            density_destination_time_shift_seconds,
+            dtype=jnp.float32,
+        ),
         wait_time_scale=jnp.asarray(wait_time_scale, dtype=jnp.float32),
         gamma=jnp.asarray(gamma, dtype=jnp.float32),
         discount_time_unit_seconds=jnp.asarray(discount_time_unit_seconds, dtype=jnp.float32),
@@ -85,6 +129,7 @@ def make_env_params(
         preplanned_origin_nodes=jnp.asarray(origin_nodes, dtype=jnp.int32),
         preplanned_dest_nodes=jnp.asarray(dest_nodes, dtype=jnp.int32),
         preplanned_deadline_times=jnp.asarray(deadline_times, dtype=jnp.float32),
+        node_density_by_hour=jnp.asarray(_precompute_node_density_by_hour(graph), dtype=jnp.float32),
         edge_raster_by_hour=jnp.asarray(_precompute_edge_raster_by_hour(graph, raster_size), dtype=jnp.float32),
     )
 
@@ -206,6 +251,7 @@ def _process_events_at_time(
     state = _spawn_preplanned_requests(state, params)
     state = _spawn_random_request_if_due(state, params)
     state, reward = _process_car_arrivals(state, params, reward)
+    state = _spawn_density_top_up_requests(state, params)
     state, reward = _assign_queued_requests(state, params, reward)
     state = _refresh_decision(state, params)
     return state, reward
@@ -410,8 +456,96 @@ def _spawn_random_request_if_due(state: EnvState, params: EnvParams) -> EnvState
     return jax.lax.cond(should_spawn, spawn, lambda s: s, state)
 
 
+def _spawn_density_top_up_requests(state: EnvState, params: EnvParams) -> EnvState:
+    if params.target_active_requests <= 0:
+        return state
+
+    active_count = _active_request_mask(state.request_status).sum().astype(jnp.int32)
+    deficit = jnp.maximum(
+        jnp.asarray(0, dtype=jnp.int32),
+        jnp.asarray(params.target_active_requests, dtype=jnp.int32) - active_count,
+    )
+
+    def body(_, carry):
+        s, spawned = carry
+        available = _request_slot_available(s.request_status)
+        has_slot = jnp.any(available)
+        slot = jnp.argmax(available.astype(jnp.int32)).astype(jnp.int32)
+        should_spawn = (spawned < deficit) & has_slot
+
+        def write(inner_carry):
+            inner, count = inner_carry
+            rng, origin_rng, dest_rng, offset_rng = jax.random.split(inner.rng, 4)
+            origin = _sample_node_from_density(origin_rng, inner.time_seconds, params)
+            raw_dest = _sample_node_from_density(
+                dest_rng,
+                inner.time_seconds + params.density_destination_time_shift_seconds,
+                params,
+            )
+            if params.graph.num_nodes > 1:
+                offset = jax.random.randint(
+                    offset_rng,
+                    (),
+                    1,
+                    params.graph.num_nodes,
+                    dtype=jnp.int32,
+                )
+                dest = jnp.where(raw_dest == origin, (origin + offset) % params.graph.num_nodes, raw_dest)
+            else:
+                dest = raw_dest
+            deadline = jnp.where(
+                jnp.isfinite(params.density_spawn_patience_seconds),
+                inner.time_seconds + params.density_spawn_patience_seconds,
+                jnp.asarray(jnp.inf, dtype=jnp.float32),
+            )
+            updated = inner.replace(
+                request_status=inner.request_status.at[slot].set(REQUEST_QUEUED),
+                request_origin_nodes=inner.request_origin_nodes.at[slot].set(origin),
+                request_dest_nodes=inner.request_dest_nodes.at[slot].set(dest),
+                request_spawn_times=inner.request_spawn_times.at[slot].set(inner.time_seconds),
+                request_deadline_times=inner.request_deadline_times.at[slot].set(deadline),
+                request_assigned_car_ids=inner.request_assigned_car_ids.at[slot].set(-1),
+                request_pickup_times=inner.request_pickup_times.at[slot].set(jnp.nan),
+                rng=rng,
+            )
+            return updated, count + jnp.asarray(1, dtype=jnp.int32)
+
+        return jax.lax.cond(should_spawn, write, lambda c: c, (s, spawned))
+
+    state, _ = jax.lax.fori_loop(
+        0,
+        params.max_requests,
+        body,
+        (state, jnp.asarray(0, dtype=jnp.int32)),
+    )
+    return state.replace(
+        metrics=state.metrics.replace(
+            queued_requests=(state.request_status == REQUEST_QUEUED).sum().astype(jnp.int32)
+        )
+    )
+
+
+def _sample_node_from_density(rng, time_seconds, params: EnvParams):
+    weights = _node_density_at(time_seconds, params)
+    logits = jnp.log(jnp.maximum(weights, 1.0e-12))
+    return jax.random.categorical(rng, logits).astype(jnp.int32)
+
+
+def _node_density_at(time_seconds, params: EnvParams):
+    hour_float = (time_seconds / 3600.0) % 24.0
+    h0 = jnp.floor(hour_float).astype(jnp.int32)
+    h1 = (h0 + 1) % 24
+    frac = hour_float - jnp.floor(hour_float)
+    weights = params.node_density_by_hour[h0] * (1.0 - frac) + params.node_density_by_hour[h1] * frac
+    return jnp.maximum(weights, 1.0e-6)
+
+
 def _request_slot_available(status):
     return (status == REQUEST_EMPTY) | (status == REQUEST_COMPLETED) | (status == REQUEST_DROPPED)
+
+
+def _active_request_mask(status):
+    return (status == REQUEST_QUEUED) | (status == REQUEST_ASSIGNED) | (status == REQUEST_ONBOARD)
 
 
 def _process_car_arrivals(
@@ -650,6 +784,46 @@ def _sample_next_spawn_time(rng, time_seconds, spawn_rate_per_minute):
     u = jnp.maximum(jax.random.uniform(rng, (), dtype=jnp.float32), 1e-6)
     interval = -jnp.log(u) / jnp.maximum(rate_per_second, 1e-6)
     return jnp.where(spawn_rate_per_minute > 0.0, time_seconds + interval, _INF)
+
+
+def _precompute_node_density_by_hour(graph: GraphArrays) -> np.ndarray:
+    density = np.asarray(graph.node_population_density, dtype=np.float32)
+    if density.shape != (graph.num_nodes,):
+        density = np.ones((graph.num_nodes,), dtype=np.float32)
+    density = np.nan_to_num(density, nan=0.0, posinf=0.0, neginf=0.0)
+    density = np.maximum(density, 0.0)
+    if float(density.sum()) <= 0.0:
+        density = np.ones((graph.num_nodes,), dtype=np.float32)
+
+    rows = np.asarray(graph.node_grid_rows, dtype=np.float32)
+    cols = np.asarray(graph.node_grid_cols, dtype=np.float32)
+    if rows.shape != (graph.num_nodes,) or cols.shape != (graph.num_nodes,):
+        rows = np.zeros((graph.num_nodes,), dtype=np.float32)
+        cols = np.arange(graph.num_nodes, dtype=np.float32)
+    rows = np.where(rows >= 0, rows, 0.0)
+    cols = np.where(cols >= 0, cols, 0.0)
+    row_count = max(1.0, float(rows.max(initial=0.0) + 1.0))
+    col_count = max(1.0, float(cols.max(initial=0.0) + 1.0))
+    cx = (col_count - 1.0) / 2.0
+    cy = (row_count - 1.0) / 2.0
+    nx = (cols - cx) / max(1.0, col_count / 2.0)
+    ny = (rows - cy) / max(1.0, row_count / 2.0)
+    center_weight = np.clip(1.0 - np.sqrt(nx * nx + ny * ny), 0.0, 1.0).astype(np.float32)
+
+    by_hour = np.zeros((24, graph.num_nodes), dtype=np.float32)
+    for hour in range(24):
+        midday_boost = _time_wave(float(hour), peak_hour=13.0, spread_hours=3.4)
+        evening_residential = _time_wave(float(hour), peak_hour=21.0, spread_hours=2.8)
+        spatial_shift = 1.0 + 0.35 * center_weight * midday_boost - 0.18 * center_weight * evening_residential
+        factor = np.clip(_POPULATION_HOURLY_MULTIPLIER[hour] * spatial_shift, 0.4, 1.75)
+        weights = np.maximum(density * factor.astype(np.float32), 1.0e-6)
+        by_hour[hour] = weights
+    return by_hour
+
+
+def _time_wave(hour: float, *, peak_hour: float, spread_hours: float) -> float:
+    delta = min(abs(hour - peak_hour), 24.0 - abs(hour - peak_hour))
+    return float(np.exp(-(delta * delta) / (2.0 * spread_hours * spread_hours)))
 
 
 def _precompute_edge_raster_by_hour(graph: GraphArrays, raster_size: int) -> np.ndarray:
