@@ -11,4 +11,8 @@ public/*
 public/data/*
 !public/data/mobility_world.json
 !public/data/mobility_orchestrator_world.json
+!public/data/osmnx_edges.geojson
+!public/data/population_density_grid.json
+!public/data/ppo_nodes.json
+!public/data/sample_trips.json
 __pycache__
