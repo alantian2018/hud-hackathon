@@ -2,7 +2,9 @@ import React, {useEffect, useMemo, useRef, useState} from "react";
 import {createRoot} from "react-dom/client";
 import DeckGL from "@deck.gl/react";
 import {GeoJsonLayer, ScatterplotLayer} from "@deck.gl/layers";
+import {LightingEffect, AmbientLight, DirectionalLight} from "@deck.gl/core";
 import {StaticMap} from "react-map-gl";
+import {createCarLayers} from "./car_layers.js";
 import "mapbox-gl/dist/mapbox-gl.css";
 import { Analytics } from "@vercel/analytics/react";
 
@@ -19,6 +21,17 @@ const INITIAL_VIEW_STATE = {
   bearing: -18
 };
 const RIDE_CAR = [245, 158, 11, 245];
+// Size (meters per model unit) for the 3D car sprite. The model is ~4.4 units
+// long, so this renders each car ~600 m on the map -- exaggerated like the old
+// dots so they stay visible at city zoom; scales naturally as you zoom in.
+const CAR_SIZE_SCALE = 135;
+// Soft studio lighting so the white 3D cars read with shading (only mesh
+// layers respond to this; GeoJson fills are unaffected).
+const CAR_LIGHTING = new LightingEffect({
+  ambient: new AmbientLight({color: [255, 255, 255], intensity: 0.9}),
+  key: new DirectionalLight({color: [255, 255, 255], intensity: 1.4, direction: [-0.8, -0.5, -1.6]}),
+  fill: new DirectionalLight({color: [210, 220, 235], intensity: 0.6, direction: [1.2, 0.9, -0.5]})
+});
 const GREEDY = {
   id: "greedy",
   label: "Greedy",
@@ -370,12 +383,28 @@ function animatedCars(snapshot, routeIndex, clockMinute, stepMinutes) {
     const coordinates = route?.coordinates ?? [];
     const elapsed = jobElapsedSeconds(job, car, snapshot, clockMinute, stepMinutes);
     const pickupCost = Number(job?.pickup_route?.cost ?? 0);
-    const progress = job && routeCoordinatesAreUsable(coordinates)
+    const onRoute = job && routeCoordinatesAreUsable(coordinates);
+    const progress = onRoute
       ? jobProgress(job, car, snapshot, clockMinute, stepMinutes)
       : 0;
+    const position = onRoute ? pointAlongRoute(coordinates, progress) ?? car.position : car.position;
+    // Heading (deg CCW from east) from the route tangent at the current point,
+    // so the 3D car points the way it is travelling.
+    let heading = Number(car.heading_deg ?? 0);
+    if (onRoute) {
+      const from = pointAlongRoute(coordinates, clamp(progress - 0.02, 0, 1)) ?? position;
+      const to = pointAlongRoute(coordinates, clamp(progress + 0.02, 0, 1)) ?? position;
+      if (from && to) {
+        const latRad = (Number(to[1]) * Math.PI) / 180;
+        const dx = (to[0] - from[0]) * Math.cos(latRad);
+        const dy = to[1] - from[1];
+        if (dx !== 0 || dy !== 0) heading = (Math.atan2(dy, dx) * 180) / Math.PI;
+      }
+    }
     return {
       ...car,
       active_job_kind: job?.kind,
+      heading,
       status: job?.kind === "reposition"
         ? "repositioning"
         : job?.kind === "trip"
@@ -383,9 +412,7 @@ function animatedCars(snapshot, routeIndex, clockMinute, stepMinutes) {
           ? "to_pickup"
           : "to_dropoff"
         : car.status,
-      position: job && routeCoordinatesAreUsable(coordinates)
-        ? pointAlongRoute(coordinates, progress) ?? car.position
-        : car.position
+      position
     };
   });
 }
@@ -1156,16 +1183,30 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
       lineWidthMinPixels: 1.5,
       pickable: true
     });
-    const carLayer = new ScatterplotLayer({
+    // En-route cars (have an active trip/reposition) render as white 3D car
+    // sprites oriented along their route; idle cars stay as simple red dots.
+    const enRouteCars = cars.filter(c => Boolean(c.active_job_kind));
+    const idleCars = cars.filter(c => !c.active_job_kind);
+    const carLayers = createCarLayers({
       id: `${policy.id}-cars`,
-      data: cars,
+      data: enRouteCars,
+      getPosition: d => d.position,
+      getYaw: d => d.heading ?? 0,
+      getColor: [245, 246, 248],
+      sizeScale: CAR_SIZE_SCALE,
+      pickable: true,
+      updateTriggers: {getOrientation: [clockMinute, routeIndex]}
+    });
+    const idleCarLayer = new ScatterplotLayer({
+      id: `${policy.id}-cars-idle`,
+      data: idleCars,
       pickable: true,
       radiusUnits: "meters",
       radiusMinPixels: 4,
       radiusMaxPixels: 12,
-      getRadius: d => d.status === "idle" ? 30 : 44,
+      getRadius: 30,
       getPosition: d => d.position,
-      getFillColor: d => d.status === "idle" ? policy.idle : d.status === "repositioning" ? policy.reposition ?? policy.active : policy.active,
+      getFillColor: [229, 57, 53, 235],
       getLineColor: [255, 255, 255, 225],
       lineWidthMinPixels: 1.2,
       stroked: true
@@ -1197,7 +1238,7 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
           pickable: false
         })
       : null;
-    return [carGrid, peopleGrid, roads, surgeArea, routeCasing, routes, people, carLayer, surgeCore].filter(Boolean);
+    return [carGrid, peopleGrid, roads, surgeArea, routeCasing, routes, people, idleCarLayer, ...carLayers, surgeCore].filter(Boolean);
   }, [network, grid, carGridData, peopleGridData, policy, snapshot, routeIndex, clockMinute, stepMinutes, cars, currentHourFloat, event, trafficPressureByCell, roadDisplayScale]);
 
   return (
@@ -1207,9 +1248,10 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
         onViewStateChange={({viewState: next}) => setViewState(next)}
         controller
         layers={layers}
+        effects={[CAR_LIGHTING]}
         getTooltip={({object, layer}) => {
           if (!object || !layer) return null;
-          if (layer.id.endsWith("-cars")) {
+          if (layer.id.includes("-cars")) {
             return {text: `${object.id}\nstatus: ${object.status}\nperson: ${object.assigned_person_id ?? "none"}`};
           }
           if (layer.id.endsWith("-routes")) {
