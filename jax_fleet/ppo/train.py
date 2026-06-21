@@ -25,7 +25,7 @@ class TrainState(train_state.TrainState):
 
 @dataclass(frozen=True)
 class TrainingConfig:
-    graph_name: str = "synthetic"
+    graph_name: str = "sf"
     data_dir: Path | str = Path("public/data")
     routing_cache_dir: Path | str = Path("cache/jax_fleet")
     routing_chunk_size: int = 512
@@ -90,6 +90,7 @@ def train_smoke(
     metrics_path: str | Path | None = None,
 ) -> dict[str, Any]:
     config = TrainingConfig(
+        graph_name="synthetic",
         seed=seed,
         num_envs=num_envs,
         num_steps=num_steps,

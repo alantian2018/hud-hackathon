@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import jax
 import jax.numpy as jnp
 
 from jax_fleet.types import EnvParams, EnvState, Observation
@@ -27,6 +28,12 @@ def build_observation(state: EnvState, params: EnvParams) -> Observation:
     length = graph.edge_lengths_m[edge_ids]
     hour = (jnp.floor(state.time_seconds / 3600.0).astype(jnp.int32)) % 24
     congestion = graph.edge_congestion[edge_ids, hour]
+    route_features = _candidate_route_demand_features(
+        state,
+        params,
+        current_node,
+        edge_targets,
+    )
     candidate_edges = jnp.stack(
         [
             delta_xy[:, 0],
@@ -40,6 +47,7 @@ def build_observation(state: EnvState, params: EnvParams) -> Observation:
         ],
         axis=-1,
     )
+    candidate_edges = jnp.concatenate([candidate_edges, route_features], axis=-1)
     candidate_edges = jnp.where(action_mask[:, None], candidate_edges, 0.0)
 
     queued = state.request_status == 1
@@ -151,6 +159,83 @@ def _build_local_raster(state: EnvState, params: EnvParams, current_node):
     center_col = jnp.asarray(size // 2, dtype=jnp.int32)
     raster = raster.at[center_row, center_col, 4].set(1.0)
     return jnp.clip(raster, 0.0, 10.0)
+
+
+def _candidate_route_demand_features(
+    state: EnvState,
+    params: EnvParams,
+    current_node,
+    edge_targets,
+):
+    graph = params.graph
+    radius = int(params.assignment_max_route_edges)
+    horizon = max(1, radius * 2)
+    request_origins = jnp.clip(state.request_origin_nodes, 0, graph.num_nodes - 1)
+    queued = state.request_status == 1
+    queued_float = queued.astype(jnp.float32)
+    has_queued = queued.any()
+    current_sources = jnp.full((params.max_requests,), current_node, dtype=jnp.int32)
+    current_hops = _route_hops_within(graph, current_sources, request_origins, horizon)
+    next_sources = jnp.broadcast_to(edge_targets[:, None], (graph.max_degree, params.max_requests))
+    next_targets = jnp.broadcast_to(request_origins[None, :], (graph.max_degree, params.max_requests))
+    next_hops = _route_hops_within(graph, next_sources, next_targets, horizon)
+
+    current_eta = graph.routing_travel_time_s[current_sources, request_origins]
+    next_eta = graph.routing_travel_time_s[next_sources, next_targets]
+    current_hops_masked = jnp.where(queued, current_hops, horizon + 1)
+    next_hops_masked = jnp.where(queued[None, :], next_hops, horizon + 1)
+    current_eta_masked = jnp.where(queued & jnp.isfinite(current_eta), current_eta, jnp.inf)
+    next_eta_masked = jnp.where(queued[None, :] & jnp.isfinite(next_eta), next_eta, jnp.inf)
+
+    current_min_hops = current_hops_masked.min()
+    next_min_hops = next_hops_masked.min(axis=1)
+    current_min_eta = current_eta_masked.min()
+    next_min_eta = next_eta_masked.min(axis=1)
+    delta_hops = (current_min_hops.astype(jnp.float32) - next_min_hops.astype(jnp.float32)) / float(horizon)
+    delta_eta_minutes = (current_min_eta - next_min_eta) / 60.0
+    delta_hops = jnp.where(has_queued, delta_hops, 0.0)
+    delta_eta_minutes = jnp.where(has_queued & jnp.isfinite(delta_eta_minutes), delta_eta_minutes, 0.0)
+
+    within_radius = queued[None, :] & (next_hops <= radius)
+    requests_within_radius = within_radius.astype(jnp.float32).sum(axis=1) / jnp.maximum(
+        params.max_requests,
+        1,
+    )
+    wait_minutes = jnp.maximum(0.0, state.time_seconds - state.request_spawn_times) / 60.0
+    wait_weighted_demand = (within_radius.astype(jnp.float32) * wait_minutes[None, :]).sum(axis=1)
+    wait_weighted_demand = wait_weighted_demand / jnp.maximum(params.max_requests, 1)
+
+    return jnp.stack(
+        [
+            delta_hops,
+            delta_eta_minutes,
+            requests_within_radius,
+            wait_weighted_demand,
+        ],
+        axis=-1,
+    )
+
+
+def _route_hops_within(graph, source_nodes, target_nodes, max_hops: int):
+    current = jnp.clip(source_nodes, 0, graph.num_nodes - 1)
+    target = jnp.clip(target_nodes, 0, graph.num_nodes - 1)
+    reached = current == target
+    unresolved = jnp.asarray(max_hops + 1, dtype=jnp.int32)
+    hops = jnp.where(reached, jnp.asarray(0, dtype=jnp.int32), unresolved)
+
+    def body(i, carry):
+        node, done, hop_count = carry
+        edge_id = graph.routing_next_edge[node, target]
+        can_step = (~done) & (edge_id >= 0)
+        next_node = graph.edge_targets[jnp.clip(edge_id, 0, graph.num_edges - 1)]
+        node = jnp.where(can_step, next_node, node)
+        now_reached = can_step & (node == target)
+        hop_count = jnp.where(now_reached, i + jnp.asarray(1, dtype=jnp.int32), hop_count)
+        done = done | now_reached
+        return node, done, hop_count
+
+    _, _, hops = jax.lax.fori_loop(0, max_hops, body, (current, reached, hops))
+    return hops
 
 
 def _node_density_at(time_seconds, params: EnvParams):

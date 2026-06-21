@@ -18,7 +18,7 @@ def build_parser() -> argparse.ArgumentParser:
     routing.add_argument("--chunk-size", default=512, type=int)
 
     train_parser = subparsers.add_parser("train", help="Run PPO training.")
-    train_parser.add_argument("--graph", choices=["synthetic", "sf"], default="synthetic")
+    train_parser.add_argument("--graph", choices=["synthetic", "sf"], default="sf")
     train_parser.add_argument("--data-dir", default="public/data")
     train_parser.add_argument("--routing-cache-dir", default="cache/jax_fleet")
     train_parser.add_argument("--routing-chunk-size", default=512, type=int)
@@ -51,7 +51,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
 
     benchmark = subparsers.add_parser("benchmark-env", help="Measure compiled env steps/sec with rendering disabled.")
-    benchmark.add_argument("--graph", choices=["synthetic", "sf"], default="synthetic")
+    benchmark.add_argument("--graph", choices=["synthetic", "sf"], default="sf")
     benchmark.add_argument("--data-dir", default="public/data")
     benchmark.add_argument("--routing-cache-dir", default="cache/jax_fleet")
     benchmark.add_argument("--routing-chunk-size", default=512, type=int)

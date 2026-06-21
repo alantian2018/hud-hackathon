@@ -97,6 +97,7 @@ def test_train_writes_metrics_checkpoint_and_resumes(tmp_path: Path) -> None:
     metrics_path = tmp_path / "metrics.jsonl"
     checkpoint_dir = tmp_path / "checkpoints"
     config = TrainingConfig(
+        graph_name="synthetic",
         seed=3,
         num_envs=2,
         num_steps=3,
@@ -153,6 +154,7 @@ def test_train_logs_to_wandb_when_tracking_enabled(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=fake_init))
     config = TrainingConfig(
+        graph_name="synthetic",
         seed=5,
         num_envs=1,
         num_steps=2,
@@ -184,6 +186,7 @@ def test_train_resolves_relative_artifact_paths(tmp_path: Path, monkeypatch) -> 
     graph = stable_graph()
     monkeypatch.chdir(tmp_path)
     config = TrainingConfig(
+        graph_name="synthetic",
         seed=4,
         num_envs=1,
         num_steps=1,
@@ -203,6 +206,11 @@ def test_train_resolves_relative_artifact_paths(tmp_path: Path, monkeypatch) -> 
 
 def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -> None:
     parser = build_parser()
+    default_train_args = parser.parse_args(["train"])
+    default_benchmark_args = parser.parse_args(["benchmark-env"])
+
+    assert default_train_args.graph == "sf"
+    assert default_benchmark_args.graph == "sf"
 
     train_args = parser.parse_args(
         [

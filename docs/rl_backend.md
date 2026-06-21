@@ -65,7 +65,9 @@ Each timestep includes:
   car's graph-bounds-normalized city position.
 - `candidate_edges`: per-action edge features. Coordinate fields are normalized:
   target `dx/dy` relative to the decision car plus target `x/y` in city bounds,
-  followed by length, duration, congestion, and validity.
+  followed by length, duration, congestion, validity, route-hop improvement,
+  ETA improvement, fraction of queued requests inside the assignment radius
+  after the action, and wait-weighted demand inside that radius.
 - `action_mask`: valid outgoing-edge slots for the current car.
 
 ## Scene Export And Debugging
@@ -96,6 +98,8 @@ Prepare or validate the full SF routing cache:
 
 W&B is optional. Install it with `pip install wandb` or
 `pip install .[tracking]`, then pass `--track` to training commands.
+The train and benchmark commands default to the full SF graph. Synthetic runs
+must opt in with `--graph synthetic`.
 
 ```bash
 python3 -m jax_fleet.cli prepare-routing \

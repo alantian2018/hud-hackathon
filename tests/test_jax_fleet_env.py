@@ -19,6 +19,7 @@ from jax_fleet.env import (
     step,
 )
 from jax_fleet.graph import build_synthetic_graph
+from jax_fleet.observations import build_observation
 from jax_fleet.scene_export import export_scene
 
 
@@ -152,6 +153,34 @@ def test_directed_nearest_car_assignment_uses_eta_not_node_id() -> None:
     chosen = nearest_eligible_car_by_eta(state, request_id, params)
 
     assert int(chosen) == 1
+
+
+def test_candidate_edges_include_route_demand_features() -> None:
+    params = make_env_params(
+        tiny_graph(),
+        max_cars=1,
+        max_requests=4,
+        initial_car_nodes=[0],
+        assignment_max_route_edges=2,
+    )
+    state, _ = reset(jax.random.PRNGKey(0), params)
+    state = state.replace(
+        time_seconds=jnp.asarray(120.0, dtype=jnp.float32),
+        request_status=state.request_status.at[0].set(REQUEST_QUEUED),
+        request_origin_nodes=state.request_origin_nodes.at[0].set(1),
+        request_dest_nodes=state.request_dest_nodes.at[0].set(3),
+        request_spawn_times=state.request_spawn_times.at[0].set(0.0),
+    )
+
+    obs = build_observation(state, params)
+
+    assert obs.candidate_edges.shape == (params.graph.max_degree, 12)
+    mean_route_eta_seconds = (23.0 * 5.0 + 15.0) / 24.0
+    np.testing.assert_allclose(
+        np.asarray(obs.candidate_edges[0, 8:12]),
+        [0.25, mean_route_eta_seconds / 60.0, 0.25, 0.5],
+        rtol=1e-6,
+    )
 
 
 def test_assignment_requires_car_within_directed_route_edge_range() -> None:
@@ -438,7 +467,7 @@ def test_reset_step_jit_and_vmap_shapes() -> None:
     assert ts.observation.raster.shape == (50, 50, 5)
     assert ts.observation.local_raster.shape == (50, 50, 5)
     assert ts.observation.structured.shape == (10,)
-    assert ts.observation.candidate_edges.shape == (params.graph.max_degree, 8)
+    assert ts.observation.candidate_edges.shape == (params.graph.max_degree, 12)
     np.testing.assert_allclose(np.asarray(ts.observation.structured[2:4]), [1.0, 0.0], rtol=1e-6)
     np.testing.assert_allclose(
         np.asarray(ts.observation.candidate_edges[0, :4]),
