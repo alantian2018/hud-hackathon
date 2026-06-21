@@ -168,9 +168,19 @@ def export_scene(
         "assignment_max_route_edges": int(params.assignment_max_route_edges),
         "invalid_actions": int(np.asarray(state.metrics.invalid_actions)),
         "pickup_wait_seconds": float(np.asarray(state.metrics.pickup_wait_seconds)),
+        "picked_up_requests": int(np.asarray(state.metrics.picked_up_requests)),
         "avg_pickup_wait_last_10_seconds": avg_pickup_wait_last_10,
         "recent_pickup_wait_count": recent_pickup_count,
         "aggregate_reward": float(np.asarray(state.metrics.aggregate_reward)),
+        "dense_wait_penalty": float(np.asarray(state.metrics.dense_wait_penalty)),
+        "drop_penalty_reward": float(np.asarray(state.metrics.drop_penalty_reward)),
+        "pickup_bonus_reward": float(np.asarray(state.metrics.pickup_bonus_reward)),
+        "queued_wait_seconds": float(np.asarray(state.metrics.queued_wait_seconds)),
+        "last_dense_wait_penalty": float(np.asarray(state.metrics.last_dense_wait_penalty)),
+        "last_drop_penalty_reward": float(np.asarray(state.metrics.last_drop_penalty_reward)),
+        "last_pickup_bonus_reward": float(np.asarray(state.metrics.last_pickup_bonus_reward)),
+        "last_queued_wait_seconds": float(np.asarray(state.metrics.last_queued_wait_seconds)),
+        "reward_mode": int(np.asarray(state.metrics.reward_mode)),
     }
 
     return {

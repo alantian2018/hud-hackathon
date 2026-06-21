@@ -10,12 +10,15 @@ from typing import Any
 from flax.training import train_state
 import jax
 import jax.numpy as jnp
+import numpy as np
 import optax
 import orbax.checkpoint as ocp
 
 from jax_fleet.env import reset, step
 from jax_fleet.graph import build_synthetic_graph, load_public_data_graph
 from jax_fleet.ppo.model import ActorCritic
+from jax_fleet.rich_renderer import RichRenderer
+from jax_fleet.scene_export import export_scene
 from jax_fleet.spawns import make_spawned_env_params
 
 
@@ -23,22 +26,68 @@ class TrainState(train_state.TrainState):
     pass
 
 
+class ReturnNormalizer:
+    """Running mean/std of returns.
+
+    The value head predicts unit-scale (normalized) values; the rest of the loop
+    (GAE, bootstrap, metrics) works in raw return units. Denormalize the head's
+    output with ``value * std + mean`` and normalize value targets with
+    ``(target - mean) / std``. Disabled normalizers behave as ``mean=0, std=1``.
+    """
+
+    def __init__(self, *, enabled: bool, decay: float):
+        self.enabled = bool(enabled)
+        self.decay = float(decay)
+        self.mean = 0.0
+        self.std = 1.0
+        self._initialized = False
+
+    def as_arrays(self):
+        if not self.enabled:
+            return jnp.asarray(0.0, jnp.float32), jnp.asarray(1.0, jnp.float32)
+        return jnp.asarray(self.mean, jnp.float32), jnp.asarray(self.std, jnp.float32)
+
+    def update(self, returns) -> None:
+        if not self.enabled:
+            return
+        batch_mean = float(jnp.mean(returns))
+        batch_std = max(float(jnp.std(returns)), 1.0e-6)
+        if not self._initialized:
+            self.mean = batch_mean
+            self.std = batch_std
+            self._initialized = True
+        else:
+            decay = self.decay
+            self.mean = decay * self.mean + (1.0 - decay) * batch_mean
+            self.std = max(decay * self.std + (1.0 - decay) * batch_std, 1.0e-6)
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
     graph_name: str = "sf"
-    data_dir: Path | str = Path("public/data")
+    data_dir: Path | str = Path("dist/data")
     routing_cache_dir: Path | str = Path("cache/jax_fleet")
     routing_chunk_size: int = 512
     seed: int = 0
-    num_envs: int = 4
-    num_steps: int = 16
-    num_updates: int = 1
+    num_envs: int = 8
+    num_steps: int = 128
+    num_updates: int = 500
     max_cars: int = 40
     max_requests: int = 32
-    assignment_max_route_edges: int = 15
-    episode_seconds: float = 3600.0
+    assignment_max_route_edges: int = 10000
+    # The fleet task is continuing: idle cars reposition forever. With an
+    # infinite horizon the env never reaches `done`, so there is no autoreset
+    # mid-rollout and the per-transition discount is never zeroed -- each
+    # num_steps window is a truncation of one long trajectory, bootstrapped by
+    # the value head. Set a finite value to recover episodic resets.
+    episode_seconds: float = float("inf")
     spawn_rate_per_minute: float = 0.0
     spawn_source: str | None = None
+    reward_mode: str = "dense_wait"
+    observation_mode: str = "learning_v1"
+    drop_penalty: float = 10.0
+    pickup_bonus: float = 0.0
+    time_discount_reference_seconds: float = 60.0
     learning_rate: float = 3e-4
     gae_lambda: float = 0.95
     clip_coef: float = 0.2
@@ -47,6 +96,9 @@ class TrainingConfig:
     max_grad_norm: float = 0.5
     update_epochs: int = 4
     num_minibatches: int = 4
+    normalize_returns: bool = True
+    return_norm_decay: float = 0.99
+    clip_vloss: bool = False
     checkpoint_dir: Path | str | None = Path("runs/jax_fleet/checkpoints")
     checkpoint_every: int = 1
     metrics_path: Path | str | None = Path("runs/jax_fleet/metrics.jsonl")
@@ -56,6 +108,14 @@ class TrainingConfig:
     wandb_entity: str | None = None
     wandb_run_name: str | None = None
     wandb_mode: str | None = None
+    wandb_video_every: int = 0
+    wandb_video_max_steps: int = 50_000
+    wandb_video_max_pickups: int = 20
+    wandb_video_max_frames: int = 240
+    wandb_video_width: int = 960
+    wandb_video_height: int = 600
+    wandb_video_fps: int = 12
+    require_gpu: bool = False
 
     def replace(self, **changes):
         return replace(self, **changes)
@@ -106,6 +166,11 @@ def train_smoke(
 
 
 def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
+    if config.require_gpu:
+        from jax_fleet.devices import require_gpu_available
+
+        require_gpu_available()
+
     graph = graph or _load_graph_from_config(config)
     spawn_source = config.spawn_source or ("density" if config.graph_name == "sf" else "uniform")
     initial_nodes = (
@@ -125,6 +190,11 @@ def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
         assignment_max_route_edges=config.assignment_max_route_edges,
         episode_seconds=config.episode_seconds,
         spawn_rate_per_minute=config.spawn_rate_per_minute,
+        reward_mode=config.reward_mode,
+        observation_mode=config.observation_mode,
+        drop_penalty=config.drop_penalty,
+        pickup_bonus=config.pickup_bonus,
+        time_discount_reference_seconds=config.time_discount_reference_seconds,
     )
     rng = jax.random.PRNGKey(config.seed)
     rng, reset_rng, init_rng = jax.random.split(rng, 3)
@@ -171,10 +241,16 @@ def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
         "last_mean_reward": 0.0,
         "latest_checkpoint": str(latest_checkpoint_path(checkpoint_dir)) if checkpoint_dir else None,
     }
+    # Running statistics that map the value head's unit-scale output to the raw
+    # return scale. Dense-wait returns are large (order -1000s); predicting them
+    # directly makes the value loss enormous and starves the policy under the
+    # shared gradient-norm clip. Normalizing keeps value targets ~unit-scale.
+    return_stats = ReturnNormalizer(enabled=config.normalize_returns, decay=config.return_norm_decay)
     wandb_run = _init_wandb_run(config)
     started_at = time.perf_counter()
     try:
         for update in range(start_update + 1, config.num_updates + 1):
+            value_mean, value_std = return_stats.as_arrays()
             rollout = _collect_rollout(
                 learner=learner,
                 states=states,
@@ -182,11 +258,16 @@ def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
                 env_params=env_params,
                 rng=rng,
                 num_steps=config.num_steps,
+                value_mean=value_mean,
+                value_std=value_std,
             )
             states = rollout["states"]
             timesteps = rollout["timesteps"]
             rng = rollout["rng"]
-            bootstrap_value = learner.apply_fn({"params": learner.params}, timesteps.observation)[1]
+            bootstrap_value = (
+                learner.apply_fn({"params": learner.params}, timesteps.observation)[1] * value_std
+                + value_mean
+            )
             advantages, returns = compute_gae(
                 rewards=rollout["rewards"],
                 values=rollout["values"],
@@ -205,7 +286,11 @@ def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
                 "values": rollout["values"].reshape((-1,)),
             }
             rng, update_rng = jax.random.split(rng)
-            learner, loss_metrics = _ppo_update(learner, batch_obs, batch, config, update_rng)
+            learner, loss_metrics = _ppo_update(
+                learner, batch_obs, batch, config, update_rng, value_mean, value_std
+            )
+            # Refresh the normalizer for the next update using this rollout's returns.
+            return_stats.update(returns)
             global_step = int(update * config.num_envs * config.num_steps)
             elapsed = max(1.0e-9, time.perf_counter() - started_at)
             metrics = _training_metrics(
@@ -236,6 +321,14 @@ def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
                 metrics["latest_checkpoint"] = str(save_path)
             _append_metrics(metrics_path, metrics)
             _log_wandb_metrics(wandb_run, metrics, step=global_step)
+            _maybe_log_wandb_video(
+                wandb_run,
+                learner=learner,
+                env_params=env_params,
+                config=config,
+                update=update,
+                global_step=global_step,
+            )
     finally:
         _finish_wandb_run(wandb_run)
 
@@ -252,6 +345,11 @@ def benchmark_env_steps(
     steps: int = 256,
 ) -> dict[str, Any]:
     import time
+
+    if config.require_gpu:
+        from jax_fleet.devices import require_gpu_available
+
+        require_gpu_available()
 
     graph = graph or _load_graph_from_config(config)
     spawn_source = config.spawn_source or ("density" if config.graph_name == "sf" else "uniform")
@@ -272,6 +370,11 @@ def benchmark_env_steps(
         assignment_max_route_edges=config.assignment_max_route_edges,
         episode_seconds=config.episode_seconds,
         spawn_rate_per_minute=config.spawn_rate_per_minute,
+        reward_mode=config.reward_mode,
+        observation_mode=config.observation_mode,
+        drop_penalty=config.drop_penalty,
+        pickup_bonus=config.pickup_bonus,
+        time_discount_reference_seconds=config.time_discount_reference_seconds,
     )
     reset_fn = jax.jit(lambda keys: jax.vmap(lambda key: reset(key, env_params))(keys))
     step_fn = jax.jit(lambda states, actions: jax.vmap(lambda s, a: step(s, a, env_params))(states, actions))
@@ -329,6 +432,15 @@ def _training_metrics(
     dt_seconds = jnp.asarray(rollout["dt_seconds"], dtype=jnp.float32)
     env_metrics = rollout["env_metrics"]
     last_env_metrics = jax.tree_util.tree_map(lambda leaf: leaf[-1], env_metrics)
+    rollout_last_queued_wait_seconds = jnp.asarray(
+        env_metrics.last_queued_wait_seconds,
+        dtype=jnp.float32,
+    )
+    rollout_last_dense_wait_penalty = jnp.asarray(
+        env_metrics.last_dense_wait_penalty,
+        dtype=jnp.float32,
+    )
+    rollout_queued_requests = jnp.asarray(env_metrics.queued_requests, dtype=jnp.float32)
     completed_steps = max(1, (int(update) - int(start_update)) * int(config.num_envs) * int(config.num_steps))
     sps = int(completed_steps / max(elapsed_seconds, 1.0e-9))
     explained_variance = _explained_variance(returns.reshape((-1,)), values.reshape((-1,)))
@@ -363,12 +475,23 @@ def _training_metrics(
         "rollout/mean_discount": float(discounts.mean()),
         "rollout/mean_dt_seconds": float(dt_seconds.mean()),
         "rollout/done_fraction": float(dones.mean()),
+        "rollout/mean_last_queued_wait_seconds": float(rollout_last_queued_wait_seconds.mean()),
+        "rollout/max_last_queued_wait_seconds": float(rollout_last_queued_wait_seconds.max()),
+        "rollout/mean_last_dense_wait_penalty": float(rollout_last_dense_wait_penalty.mean()),
+        "rollout/mean_queued_requests": float(rollout_queued_requests.mean()),
         "env/completed_requests": float(jnp.asarray(last_env_metrics.completed_requests).mean()),
         "env/dropped_requests": float(jnp.asarray(last_env_metrics.dropped_requests).mean()),
+        "env/picked_up_requests": float(jnp.asarray(last_env_metrics.picked_up_requests).mean()),
         "env/queued_requests": float(jnp.asarray(last_env_metrics.queued_requests).mean()),
         "env/invalid_actions": float(jnp.asarray(last_env_metrics.invalid_actions).mean()),
         "env/pickup_wait_seconds": float(jnp.asarray(last_env_metrics.pickup_wait_seconds).mean()),
         "env/aggregate_reward": float(jnp.asarray(last_env_metrics.aggregate_reward).mean()),
+        "env/dense_wait_penalty": float(jnp.asarray(last_env_metrics.dense_wait_penalty).mean()),
+        "env/drop_penalty_reward": float(jnp.asarray(last_env_metrics.drop_penalty_reward).mean()),
+        "env/pickup_bonus_reward": float(jnp.asarray(last_env_metrics.pickup_bonus_reward).mean()),
+        "env/queued_wait_seconds": float(jnp.asarray(last_env_metrics.queued_wait_seconds).mean()),
+        "env/last_queued_wait_seconds": float(jnp.asarray(last_env_metrics.last_queued_wait_seconds).mean()),
+        "env/reward_mode": float(jnp.asarray(last_env_metrics.reward_mode).mean()),
     }
     return metrics
 
@@ -408,6 +531,119 @@ def _log_wandb_metrics(wandb_run, metrics: dict[str, Any], *, step: int) -> None
     if wandb_run is None:
         return
     wandb_run.log(metrics, step=step)
+
+
+def _maybe_log_wandb_video(
+    wandb_run,
+    *,
+    learner: TrainState,
+    env_params,
+    config: TrainingConfig,
+    update: int,
+    global_step: int,
+) -> None:
+    if wandb_run is None or int(config.wandb_video_every) <= 0:
+        return
+    if int(update) % int(config.wandb_video_every) != 0:
+        return
+    try:
+        payload = _render_policy_rollout_video(
+            learner=learner,
+            env_params=env_params,
+            config=config,
+            seed=int(config.seed) + int(update) * 1009,
+        )
+    except Exception as exc:
+        wandb_run.log(
+            {
+                "diagnostics/policy_video_failed": 1.0,
+                "diagnostics/policy_video_error": str(exc),
+            },
+            step=global_step,
+        )
+        return
+    if payload is None:
+        return
+    video, video_metrics = payload
+    try:
+        import wandb
+    except ImportError:
+        return
+    wandb_run.log(
+        {
+            "diagnostics/policy_video": wandb.Video(
+                video,
+                fps=max(1, int(config.wandb_video_fps)),
+                format="mp4",
+            ),
+            **video_metrics,
+        },
+        step=global_step,
+    )
+
+
+def _render_policy_rollout_video(
+    *,
+    learner: TrainState,
+    env_params,
+    config: TrainingConfig,
+    seed: int,
+) -> tuple[np.ndarray, dict[str, float]] | None:
+    max_steps = max(1, int(config.wandb_video_max_steps))
+    max_pickups = max(0, int(config.wandb_video_max_pickups))
+    max_frames = max(1, int(config.wandb_video_max_frames))
+    capture_every = max(1, int(np.ceil(max_steps / max_frames)))
+    renderer = RichRenderer(
+        width=max(1, int(config.wandb_video_width)),
+        height=max(1, int(config.wandb_video_height)),
+    )
+    cpu_device = jax.devices("cpu")[0]
+    env_params = jax.device_put(env_params, cpu_device)
+    model_params = jax.device_put(learner.params, cpu_device)
+
+    @partial(jax.jit, device=cpu_device)
+    def policy_step(loop_state, loop_timestep, model_params):
+        logits, _ = learner.apply_fn({"params": model_params}, loop_timestep.observation)
+        action = jnp.argmax(logits).astype(jnp.int32)
+        return step(loop_state, action, env_params)
+
+    state, timestep = reset(jax.device_put(jax.random.PRNGKey(seed), cpu_device), env_params)
+    frames: list[np.ndarray] = []
+
+    def capture(include_static: bool) -> None:
+        scene = export_scene(
+            state,
+            timestep,
+            env_params,
+            include_static=include_static,
+            include_route_previews=True,
+        )
+        frames.append(renderer.render(scene))
+
+    capture(include_static=True)
+    steps = 0
+    while steps < max_steps and not bool(np.asarray(timestep.done)):
+        if max_pickups > 0 and int(np.asarray(state.metrics.picked_up_requests)) >= max_pickups:
+            break
+        state, timestep = policy_step(state, timestep, model_params)
+        steps += 1
+        should_capture = (steps % capture_every == 0) and (len(frames) < max_frames)
+        if should_capture:
+            capture(include_static=renderer.needs_static_scene(float(np.asarray(state.time_seconds))))
+
+    if len(frames) == 0:
+        return None
+    if len(frames) == 1:
+        capture(include_static=renderer.needs_static_scene(float(np.asarray(state.time_seconds))))
+    video = np.stack(frames, axis=0).transpose(0, 3, 1, 2)
+    video_metrics = {
+        "diagnostics/video_steps": float(steps),
+        "diagnostics/video_pickups": float(np.asarray(state.metrics.picked_up_requests)),
+        "diagnostics/video_completed_requests": float(np.asarray(state.metrics.completed_requests)),
+        "diagnostics/video_dropped_requests": float(np.asarray(state.metrics.dropped_requests)),
+        "diagnostics/video_reward": float(np.asarray(state.metrics.aggregate_reward)),
+    }
+    return video.astype(np.uint8, copy=False), video_metrics
 
 
 def _finish_wandb_run(wandb_run) -> None:
@@ -503,8 +739,19 @@ def _collect_rollout(
     env_params,
     rng,
     num_steps: int,
+    value_mean=0.0,
+    value_std=1.0,
 ) -> dict[str, Any]:
-    return _collect_rollout_scan(learner, states, timesteps, env_params, rng, num_steps)
+    return _collect_rollout_scan(
+        learner,
+        states,
+        timesteps,
+        env_params,
+        rng,
+        jnp.asarray(value_mean, jnp.float32),
+        jnp.asarray(value_std, jnp.float32),
+        num_steps,
+    )
 
 
 @partial(jax.jit, static_argnames=("num_steps",))
@@ -514,20 +761,37 @@ def _collect_rollout_scan(
     timesteps,
     env_params,
     rng,
+    value_mean,
+    value_std,
     num_steps: int,
 ) -> dict[str, Any]:
     def body(carry, _):
         loop_states, loop_timesteps, loop_rng = carry
         observation = loop_timesteps.observation
-        logits, value = learner.apply_fn({"params": learner.params}, observation)
+        logits, value_norm = learner.apply_fn({"params": learner.params}, observation)
+        # The head outputs a unit-scale value; store it in raw return units so GAE
+        # and the bootstrap stay consistent with the env reward scale.
+        value = value_norm * value_std + value_mean
         loop_rng, action_rng, reset_rng = jax.random.split(loop_rng, 3)
         action = jax.random.categorical(action_rng, logits).astype(jnp.int32)
         all_log_probs = jax.nn.log_softmax(logits)
         selected_log_prob = jnp.take_along_axis(all_log_probs, action[:, None], axis=1).squeeze(1)
 
         next_states, next_timesteps = jax.vmap(lambda s, a: step(s, a, env_params))(loop_states, action)
-        reset_keys = jax.random.split(reset_rng, next_timesteps.done.shape[0])
-        reset_states, reset_timesteps = jax.vmap(lambda key: reset(key, env_params))(reset_keys)
+        # Episodes rarely end inside a rollout, so only pay for the (expensive)
+        # full vmapped reset when at least one env is actually done.
+        any_done = jnp.any(next_timesteps.done)
+
+        def _do_reset(_):
+            reset_keys = jax.random.split(reset_rng, next_timesteps.done.shape[0])
+            return jax.vmap(lambda key: reset(key, env_params))(reset_keys)
+
+        reset_states, reset_timesteps = jax.lax.cond(
+            any_done,
+            _do_reset,
+            lambda _: (next_states, next_timesteps),
+            operand=None,
+        )
         loop_states = jax.tree_util.tree_map(
             lambda reset_leaf, next_leaf: _select_done(next_timesteps.done, reset_leaf, next_leaf),
             reset_states,
@@ -580,7 +844,11 @@ def _ppo_update(
     batch: dict[str, Any],
     config: TrainingConfig,
     rng,
+    value_mean=0.0,
+    value_std=1.0,
 ):
+    value_mean = jnp.asarray(value_mean, jnp.float32)
+    value_std = jnp.asarray(value_std, jnp.float32)
     advantages = batch["advantages"]
     advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
     batch = {**batch, "advantages": advantages}
@@ -625,6 +893,8 @@ def _ppo_update(
                 minibatch_batch,
                 minibatch_mask,
                 config,
+                value_mean,
+                value_std,
             )
             return next_learner, metrics
 
@@ -646,7 +916,11 @@ def _ppo_minibatch_update(
     batch: dict[str, Any],
     sample_mask,
     config: TrainingConfig,
+    value_mean=0.0,
+    value_std=1.0,
 ):
+    value_mean = jnp.asarray(value_mean, jnp.float32)
+    value_std = jnp.asarray(value_std, jnp.float32)
     normalizer = jnp.maximum(sample_mask.sum(), 1.0)
 
     def weighted_mean(values):
@@ -661,14 +935,20 @@ def _ppo_minibatch_update(
         policy_loss = -weighted_mean(
             jnp.minimum(ratio * batch["advantages"], clipped_ratio * batch["advantages"])
         )
-        value_pred_clipped = batch["values"] + jnp.clip(
-            new_values - batch["values"],
-            -config.clip_coef,
-            config.clip_coef,
-        )
-        value_loss = (new_values - batch["returns"]) ** 2
-        value_loss_clipped = (value_pred_clipped - batch["returns"]) ** 2
-        value_loss = 0.5 * weighted_mean(jnp.maximum(value_loss, value_loss_clipped))
+        # The value head predicts normalized targets; compare in that space so the
+        # squared error (and clip range) are unit-scale regardless of return size.
+        returns_norm = (batch["returns"] - value_mean) / value_std
+        old_values_norm = (batch["values"] - value_mean) / value_std
+        value_error = (new_values - returns_norm) ** 2
+        if config.clip_vloss:
+            value_pred_clipped = old_values_norm + jnp.clip(
+                new_values - old_values_norm,
+                -config.clip_coef,
+                config.clip_coef,
+            )
+            value_error_clipped = (value_pred_clipped - returns_norm) ** 2
+            value_error = jnp.maximum(value_error, value_error_clipped)
+        value_loss = 0.5 * weighted_mean(value_error)
         probs = jax.nn.softmax(logits)
         entropy = weighted_mean(-jnp.sum(probs * log_probs, axis=-1))
         old_approx_kl = weighted_mean(-jnp.log(ratio))

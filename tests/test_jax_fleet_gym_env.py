@@ -240,11 +240,20 @@ def test_live_cli_defaults_to_sf_graph() -> None:
     args = build_arg_parser().parse_args([])
 
     assert args.graph == "sf"
+    assert args.data_dir == "dist/data"
     assert args.start_time_seconds == 7 * 3600.0
     assert np.isinf(args.episode_seconds)
     assert args.max_steps is None
     assert args.max_cars == 40
-    assert args.assignment_max_route_edges == 15
+    assert args.assignment_max_route_edges == 10000
+    assert args.policy == "random"
+    assert args.reward_mode == "dense_wait"
+    assert args.observation_mode == "learning_v1"
+    assert args.drop_penalty == 10.0
+    assert args.pickup_bonus == 0.0
+    assert args.time_discount_reference_seconds == 60.0
+    assert args.policy_checkpoint is None
+    assert args.policy_checkpoint_dir == "runs/jax_fleet/sf/checkpoints"
     assert args.render_scale == 1
     assert args.sim_steps_per_render == 1
     assert args.jit is True
@@ -296,6 +305,29 @@ def test_live_cli_accepts_render_speed_controls() -> None:
     assert args.jit is False
 
 
+def test_live_cli_accepts_checkpoint_policy() -> None:
+    args = build_arg_parser().parse_args(
+        [
+            "--policy",
+            "checkpoint",
+            "--policy-checkpoint",
+            "latest",
+            "--policy-checkpoint-dir",
+            "runs/jax_fleet/sf/checkpoints",
+        ]
+    )
+
+    assert args.policy == "checkpoint"
+    assert args.policy_checkpoint == "latest"
+    assert args.policy_checkpoint_dir == "runs/jax_fleet/sf/checkpoints"
+
+
+def test_live_cli_accepts_heuristic_policy() -> None:
+    args = build_arg_parser().parse_args(["--policy", "heuristic"])
+
+    assert args.policy == "heuristic"
+
+
 def test_live_cli_explicit_max_steps_caps_loop() -> None:
     args = build_arg_parser().parse_args(["--max-steps", "3", "--episode-seconds", "240"])
 
@@ -303,6 +335,13 @@ def test_live_cli_explicit_max_steps_caps_loop() -> None:
     assert args.episode_seconds == 240.0
     assert _within_step_limit(2, args.max_steps)
     assert not _within_step_limit(3, args.max_steps)
+
+
+def test_live_cli_accepts_pickup_cap() -> None:
+    args = build_arg_parser().parse_args(["--max-steps", "50000", "--max-pickups", "20"])
+
+    assert args.max_steps == 50000
+    assert args.max_pickups == 20
 
 
 def test_pyglet_renderer_configures_stretch_dpi(monkeypatch) -> None:

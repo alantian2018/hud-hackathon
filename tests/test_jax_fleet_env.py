@@ -7,6 +7,9 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax_fleet.env import (
+    CAR_DECISION,
+    CAR_TO_PICKUP,
+    REWARD_MODE_LEGACY_PICKUP_WAIT,
     REQUEST_ASSIGNED,
     REQUEST_DROPPED,
     REQUEST_COMPLETED,
@@ -19,7 +22,27 @@ from jax_fleet.env import (
     step,
 )
 from jax_fleet.graph import build_synthetic_graph
-from jax_fleet.observations import build_observation
+from jax_fleet.heuristics import choose_marginal_value_action
+from jax_fleet.observations import (
+    CANDIDATE_EDGE_FEATURES,
+    CE_BEST_AFTER_EDGE_COUNT,
+    CE_ETA_IMPROVEMENT,
+    CE_REACHABLE_5M,
+    CE_VALID,
+    CE_WAIT_WEIGHTED_ADVANTAGE,
+    LEGACY_CANDIDATE_EDGE_FEATURES,
+    LEGACY_DENSITY_CHANNEL,
+    LEGACY_FOCUS_CAR_CHANNEL,
+    LEGACY_RASTER_CHANNELS,
+    LEGACY_STRUCTURED_FEATURES,
+    RASTER_CHANNELS,
+    RASTER_EXPECTED_DEMAND_10M,
+    RASTER_FOCUS_CAR,
+    STRUCT_CURRENT_X,
+    STRUCT_CURRENT_Y,
+    STRUCTURED_FEATURES,
+    build_observation,
+)
 from jax_fleet.scene_export import export_scene
 
 
@@ -162,6 +185,7 @@ def test_candidate_edges_include_route_demand_features() -> None:
         max_requests=4,
         initial_car_nodes=[0],
         assignment_max_route_edges=2,
+        observation_mode="legacy",
     )
     state, _ = reset(jax.random.PRNGKey(0), params)
     state = state.replace(
@@ -174,13 +198,43 @@ def test_candidate_edges_include_route_demand_features() -> None:
 
     obs = build_observation(state, params)
 
-    assert obs.candidate_edges.shape == (params.graph.max_degree, 12)
+    assert obs.candidate_edges.shape == (params.graph.max_degree, LEGACY_CANDIDATE_EDGE_FEATURES)
     mean_route_eta_seconds = (23.0 * 5.0 + 15.0) / 24.0
     np.testing.assert_allclose(
         np.asarray(obs.candidate_edges[0, 8:12]),
         [0.25, mean_route_eta_seconds / 60.0, 0.25, 0.5],
         rtol=1e-6,
     )
+
+
+def test_candidate_edges_expose_marginal_value_signal_for_request() -> None:
+    params = make_env_params(
+        tiny_graph(),
+        max_cars=1,
+        max_requests=4,
+        initial_car_nodes=[0],
+    )
+    state, _ = reset(jax.random.PRNGKey(0), params)
+    state = state.replace(
+        time_seconds=jnp.asarray(120.0, dtype=jnp.float32),
+        request_status=state.request_status.at[0].set(REQUEST_QUEUED),
+        request_origin_nodes=state.request_origin_nodes.at[0].set(1),
+        request_dest_nodes=state.request_dest_nodes.at[0].set(3),
+        request_spawn_times=state.request_spawn_times.at[0].set(0.0),
+    )
+
+    obs = build_observation(state, params)
+
+    assert obs.candidate_edges.shape == (params.graph.max_degree, CANDIDATE_EDGE_FEATURES)
+    assert float(obs.candidate_edges[0, CE_VALID]) == 1.0
+    assert float(obs.candidate_edges[0, CE_REACHABLE_5M]) > 0.0
+    assert float(obs.candidate_edges[0, CE_ETA_IMPROVEMENT]) > 0.0
+    assert float(obs.candidate_edges[0, CE_BEST_AFTER_EDGE_COUNT]) > 0.0
+    assert float(obs.candidate_edges[0, CE_WAIT_WEIGHTED_ADVANTAGE]) > 0.0
+    assert int(choose_marginal_value_action(obs)) == 0
+    invalid_rows = np.asarray(obs.candidate_edges)[~np.asarray(obs.action_mask)]
+    if invalid_rows.size:
+        np.testing.assert_allclose(invalid_rows, 0.0, atol=0.0)
 
 
 def test_assignment_requires_car_within_directed_route_edge_range() -> None:
@@ -246,6 +300,52 @@ def test_queued_request_waits_until_car_becomes_eligible() -> None:
     assert math.isclose(float(ts.reward), -5.0 / 60.0, rel_tol=1e-6)
 
 
+def test_dense_reward_penalizes_waiting_without_pickup() -> None:
+    graph = build_synthetic_graph(
+        node_lonlat=[(0.0, 0.0), (1.0, 0.0)],
+        edges=[{"source": 0, "target": 0, "travel_time_s": 2.0}],
+    )
+    params = make_env_params(
+        graph,
+        max_cars=1,
+        max_requests=2,
+        initial_car_nodes=[0],
+        preplanned_requests=[{"spawn_time_s": 0.0, "origin": 1, "destination": 1}],
+    )
+    state, _ = reset(jax.random.PRNGKey(0), params)
+
+    state, ts = step(state, jnp.int32(0), params)
+
+    assert int(state.request_status[0]) == REQUEST_QUEUED
+    assert float(ts.reward) < 0.0
+    assert math.isclose(float(ts.metrics.last_queued_wait_seconds), 2.0, rel_tol=1e-6)
+    assert math.isclose(float(ts.metrics.last_dense_wait_penalty), -2.0 / 60.0, rel_tol=1e-6)
+    assert math.isclose(float(ts.reward), -2.0 / 60.0, rel_tol=1e-6)
+
+
+def test_dense_reward_adds_new_drop_penalty() -> None:
+    graph = build_synthetic_graph(
+        node_lonlat=[(0.0, 0.0), (1.0, 0.0)],
+        edges=[{"source": 0, "target": 0, "travel_time_s": 2.0}],
+    )
+    params = make_env_params(
+        graph,
+        max_cars=1,
+        max_requests=2,
+        initial_car_nodes=[0],
+        preplanned_requests=[{"spawn_time_s": 0.0, "origin": 1, "destination": 1, "patience_s": 1.0}],
+        drop_penalty=10.0,
+    )
+    state, _ = reset(jax.random.PRNGKey(0), params)
+
+    state, ts = step(state, jnp.int32(0), params)
+
+    assert int(state.request_status[0]) == REQUEST_DROPPED
+    assert math.isclose(float(ts.metrics.last_queued_wait_seconds), 1.0, rel_tol=1e-6)
+    assert math.isclose(float(ts.metrics.last_drop_penalty_reward), -10.0, rel_tol=1e-6)
+    assert math.isclose(float(ts.reward), -10.0 - 1.0 / 60.0, rel_tol=1e-6)
+
+
 def test_edge_traffic_profile_sets_travel_time_when_edge_is_entered() -> None:
     params = make_env_params(
         tiny_graph(),
@@ -262,7 +362,7 @@ def test_edge_traffic_profile_sets_travel_time_when_edge_is_entered() -> None:
     assert float(state.time_seconds) == 17 * 3600.0 + 15.0
 
 
-def test_fixed_discount_and_sparse_pickup_reward() -> None:
+def test_time_aware_discount_and_legacy_pickup_reward_mode() -> None:
     params = make_env_params(
         tiny_graph(),
         max_cars=1,
@@ -270,12 +370,13 @@ def test_fixed_discount_and_sparse_pickup_reward() -> None:
         initial_car_nodes=[0],
         preplanned_requests=[{"spawn_time_s": 2.0, "origin": 1, "destination": 3}],
         gamma=0.99,
+        reward_mode=REWARD_MODE_LEGACY_PICKUP_WAIT,
     )
     state, _ = reset(jax.random.PRNGKey(1), params)
 
     _, ts = step(state, jnp.int32(0), params)
 
-    assert math.isclose(float(ts.discount), 0.99, rel_tol=1e-6)
+    assert math.isclose(float(ts.discount), 0.99 ** (9.0 / 60.0), rel_tol=1e-6)
     assert math.isclose(float(ts.reward), -3.0 / 60.0, rel_tol=1e-6)
 
 
@@ -464,24 +565,63 @@ def test_reset_step_jit_and_vmap_shapes() -> None:
     state, ts = jitted_step(state, jnp.int32(0), params)
 
     assert state.car_nodes.shape == (2,)
-    assert ts.observation.raster.shape == (50, 50, 5)
-    assert ts.observation.local_raster.shape == (50, 50, 5)
-    assert ts.observation.structured.shape == (10,)
-    assert ts.observation.candidate_edges.shape == (params.graph.max_degree, 12)
-    np.testing.assert_allclose(np.asarray(ts.observation.structured[2:4]), [1.0, 0.0], rtol=1e-6)
+    assert ts.observation.raster.shape == (50, 50, RASTER_CHANNELS)
+    assert ts.observation.local_raster.shape == (50, 50, RASTER_CHANNELS)
+    assert ts.observation.structured.shape == (STRUCTURED_FEATURES,)
+    assert ts.observation.candidate_edges.shape == (params.graph.max_degree, CANDIDATE_EDGE_FEATURES)
+    assert np.isfinite(np.asarray(ts.observation.raster)).all()
+    assert np.isfinite(np.asarray(ts.observation.local_raster)).all()
+    assert np.isfinite(np.asarray(ts.observation.structured)).all()
+    assert np.isfinite(np.asarray(ts.observation.candidate_edges)).all()
+    np.testing.assert_allclose(
+        np.asarray(ts.observation.structured)[[STRUCT_CURRENT_X, STRUCT_CURRENT_Y]],
+        [1.0, 0.0],
+        rtol=1e-6,
+    )
     np.testing.assert_allclose(
         np.asarray(ts.observation.candidate_edges[0, :4]),
         [-0.5, 0.0, 0.5, 0.0],
         rtol=1e-6,
     )
-    assert float(ts.observation.raster[:, :, 3].max()) > 0.0
-    assert float(ts.observation.raster[:, :, 4].sum()) == 1.0
-    assert float(ts.observation.local_raster[:, :, 3].max()) > 0.0
-    assert float(ts.observation.local_raster[25, 25, 4]) == 1.0
+    assert float(ts.observation.raster[:, :, RASTER_EXPECTED_DEMAND_10M].max()) > 0.0
+    assert float(ts.observation.raster[:, :, RASTER_FOCUS_CAR].sum()) == 1.0
+    assert float(ts.observation.local_raster[:, :, RASTER_EXPECTED_DEMAND_10M].max()) > 0.0
+    assert float(ts.observation.local_raster[25, 25, RASTER_FOCUS_CAR]) == 1.0
     keys = jax.random.split(jax.random.PRNGKey(5), 3)
     states, timesteps = jax.vmap(lambda k: reset(k, params))(keys)
     assert states.car_nodes.shape == (3, 2)
     assert timesteps.observation.action_mask.shape == (3, params.graph.max_degree)
+
+
+def test_legacy_raster_splits_available_and_busy_car_channels() -> None:
+    params = make_env_params(
+        tiny_graph(),
+        max_cars=2,
+        max_requests=4,
+        initial_car_nodes=[0, 0],
+        observation_mode="legacy",
+    )
+    state, _ = reset(jax.random.PRNGKey(0), params)
+    state = state.replace(
+        car_status=jnp.asarray([CAR_DECISION, CAR_TO_PICKUP], dtype=jnp.int32),
+        current_car_id=jnp.asarray(0, dtype=jnp.int32),
+    )
+
+    obs = build_observation(state, params)
+
+    assert obs.raster.shape == (50, 50, LEGACY_RASTER_CHANNELS)
+    assert obs.local_raster.shape == (50, 50, LEGACY_RASTER_CHANNELS)
+    assert obs.structured.shape == (LEGACY_STRUCTURED_FEATURES,)
+    row = int(np.asarray(params.graph.node_grid_rows[0]))
+    col = int(np.asarray(params.graph.node_grid_cols[0]))
+    assert float(obs.raster[row, col, 0]) == 1.0
+    assert float(obs.raster[row, col, 1]) == 1.0
+    assert float(obs.raster[:, :, 0].sum()) == 1.0
+    assert float(obs.raster[:, :, 1].sum()) == 1.0
+    assert float(obs.local_raster[25, 25, 0]) == 1.0
+    assert float(obs.local_raster[25, 25, 1]) == 1.0
+    assert float(obs.raster[:, :, LEGACY_DENSITY_CHANNEL].max()) > 0.0
+    assert float(obs.local_raster[25, 25, LEGACY_FOCUS_CAR_CHANNEL]) == 1.0
 
 
 def test_scene_export_schema_uses_same_state_as_debug_visualizer() -> None:

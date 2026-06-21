@@ -126,7 +126,7 @@ def test_train_writes_metrics_checkpoint_and_resumes(tmp_path: Path) -> None:
         first_metrics["losses/explained_variance"]
     )
     assert first_metrics["charts/global_step"] == config.num_envs * config.num_steps
-    assert np.isclose(first_metrics["rollout/mean_discount"], 0.99)
+    assert 0.0 <= first_metrics["rollout/mean_discount"] <= 1.0
 
     resumed = train(config.replace(num_updates=2, resume=True), graph=graph)
 
@@ -211,10 +211,18 @@ def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -
 
     assert default_train_args.graph == "sf"
     assert default_benchmark_args.graph == "sf"
+    assert default_train_args.data_dir == "dist/data"
+    assert default_benchmark_args.data_dir == "dist/data"
     assert default_train_args.max_cars == 40
     assert default_train_args.max_requests == 32
     assert default_benchmark_args.max_cars == 40
     assert default_benchmark_args.max_requests == 32
+    assert default_train_args.require_gpu is False
+    assert default_benchmark_args.require_gpu is False
+
+    gpu_args = parser.parse_args(["check-gpu", "--require-gpu"])
+    assert gpu_args.command == "check-gpu"
+    assert gpu_args.require_gpu is True
 
     train_args = parser.parse_args(
         [
@@ -233,11 +241,21 @@ def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -
     assert train_args.graph == "synthetic"
     assert train_args.spawn_source == "uniform"
     assert train_args.num_updates == 2
-    assert train_args.assignment_max_route_edges == 15
+    assert train_args.assignment_max_route_edges == 10000
+    assert train_args.reward_mode == "dense_wait"
+    assert train_args.observation_mode == "learning_v1"
+    assert train_args.drop_penalty == 10.0
+    assert train_args.pickup_bonus == 0.0
+    assert train_args.time_discount_reference_seconds == 60.0
     assert train_args.update_epochs == 4
     assert train_args.num_minibatches == 4
+    assert train_args.require_gpu is False
     assert train_args.track is False
     assert train_args.wandb_project_name == "jax_fleet"
+    assert train_args.wandb_video_every == 0
+    assert train_args.wandb_video_max_steps == 50000
+    assert train_args.wandb_video_max_pickups == 20
+    assert train_args.wandb_video_max_frames == 240
 
     routing_args = parser.parse_args(
         [
@@ -267,4 +285,7 @@ def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -
     assert benchmark_args.command == "benchmark-env"
     assert benchmark_args.steps == 8
     assert benchmark_args.num_envs == 2
-    assert benchmark_args.assignment_max_route_edges == 15
+    assert benchmark_args.assignment_max_route_edges == 10000
+    assert benchmark_args.reward_mode == "dense_wait"
+    assert benchmark_args.observation_mode == "learning_v1"
+    assert benchmark_args.require_gpu is False

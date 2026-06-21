@@ -22,6 +22,12 @@ REQUEST_ONBOARD = 3
 REQUEST_COMPLETED = 4
 REQUEST_DROPPED = 5
 
+REWARD_MODE_LEGACY_PICKUP_WAIT = "legacy_pickup_wait"
+REWARD_MODE_DENSE_WAIT = "dense_wait"
+REWARD_MODE_LEGACY_CODE = 0
+REWARD_MODE_DENSE_CODE = 1
+OBSERVATION_MODE_LEGACY = "legacy"
+OBSERVATION_MODE_LEARNING_V1 = "learning_v1"
 _INF = 1.0e20
 _RECENT_PICKUP_WAIT_WINDOW = 10
 _POPULATION_HOURLY_MULTIPLIER = np.asarray(
@@ -69,11 +75,16 @@ def make_env_params(
     target_active_request_fraction: float = 0.0,
     density_spawn_patience_seconds: float = np.inf,
     density_destination_time_shift_seconds: float = 2.0 * 3600.0,
+    reward_mode: str = REWARD_MODE_DENSE_WAIT,
+    observation_mode: str = OBSERVATION_MODE_LEARNING_V1,
     wait_time_scale: float = 1.0 / 60.0,
+    drop_penalty: float = 10.0,
+    pickup_bonus: float = 0.0,
     gamma: float = 0.99,
+    time_discount_reference_seconds: float = 60.0,
     raster_size: int = 50,
     max_event_steps: int = 512,
-    assignment_max_route_edges: int = 15,
+    assignment_max_route_edges: int = 10000,
 ) -> EnvParams:
     if initial_car_nodes is None:
         initial = np.zeros((max_cars,), dtype=np.int32)
@@ -90,6 +101,14 @@ def make_env_params(
     else:
         target_active = int(target_active_requests)
     target_active = int(np.clip(target_active, 0, max_requests))
+    if reward_mode not in {REWARD_MODE_DENSE_WAIT, REWARD_MODE_LEGACY_PICKUP_WAIT}:
+        raise ValueError(
+            f"reward_mode must be {REWARD_MODE_DENSE_WAIT!r} or {REWARD_MODE_LEGACY_PICKUP_WAIT!r}"
+        )
+    if observation_mode not in {OBSERVATION_MODE_LEARNING_V1, OBSERVATION_MODE_LEGACY}:
+        raise ValueError(
+            f"observation_mode must be {OBSERVATION_MODE_LEARNING_V1!r} or {OBSERVATION_MODE_LEGACY!r}"
+        )
 
     scheduled = list(preplanned_requests or [])
     spawn_times = np.full((len(scheduled),), np.inf, dtype=np.float32)
@@ -117,6 +136,8 @@ def make_env_params(
         max_event_steps=max_event_steps,
         target_active_requests=target_active,
         assignment_max_route_edges=max(0, int(assignment_max_route_edges)),
+        reward_mode=reward_mode,
+        observation_mode=observation_mode,
         initial_car_nodes=jnp.asarray(initial, dtype=jnp.int32),
         start_time_seconds=jnp.asarray(start_time_seconds, dtype=jnp.float32),
         episode_seconds=jnp.asarray(episode_seconds, dtype=jnp.float32),
@@ -127,7 +148,10 @@ def make_env_params(
             dtype=jnp.float32,
         ),
         wait_time_scale=jnp.asarray(wait_time_scale, dtype=jnp.float32),
+        drop_penalty=jnp.asarray(drop_penalty, dtype=jnp.float32),
+        pickup_bonus=jnp.asarray(pickup_bonus, dtype=jnp.float32),
         gamma=jnp.asarray(gamma, dtype=jnp.float32),
+        time_discount_reference_seconds=jnp.asarray(time_discount_reference_seconds, dtype=jnp.float32),
         preplanned_spawn_times=jnp.asarray(spawn_times, dtype=jnp.float32),
         preplanned_origin_nodes=jnp.asarray(origin_nodes, dtype=jnp.int32),
         preplanned_dest_nodes=jnp.asarray(dest_nodes, dtype=jnp.int32),
@@ -169,17 +193,28 @@ def reset(rng, params: EnvParams) -> tuple[EnvState, Timestep]:
             invalid_actions=jnp.asarray(0, dtype=jnp.int32),
             dropped_requests=jnp.asarray(0, dtype=jnp.int32),
             completed_requests=jnp.asarray(0, dtype=jnp.int32),
+            picked_up_requests=jnp.asarray(0, dtype=jnp.int32),
             queued_requests=jnp.asarray(0, dtype=jnp.int32),
             pickup_wait_seconds=jnp.asarray(0.0, dtype=jnp.float32),
             aggregate_reward=jnp.asarray(0.0, dtype=jnp.float32),
+            dense_wait_penalty=jnp.asarray(0.0, dtype=jnp.float32),
+            drop_penalty_reward=jnp.asarray(0.0, dtype=jnp.float32),
+            pickup_bonus_reward=jnp.asarray(0.0, dtype=jnp.float32),
+            queued_wait_seconds=jnp.asarray(0.0, dtype=jnp.float32),
+            last_dense_wait_penalty=jnp.asarray(0.0, dtype=jnp.float32),
+            last_drop_penalty_reward=jnp.asarray(0.0, dtype=jnp.float32),
+            last_pickup_bonus_reward=jnp.asarray(0.0, dtype=jnp.float32),
+            last_queued_wait_seconds=jnp.asarray(0.0, dtype=jnp.float32),
+            reward_mode=jnp.asarray(_reward_mode_code(params), dtype=jnp.int32),
             recent_pickup_wait_seconds=jnp.zeros((_RECENT_PICKUP_WAIT_WINDOW,), dtype=jnp.float32),
             recent_pickup_wait_count=jnp.asarray(0, dtype=jnp.int32),
             recent_pickup_wait_index=jnp.asarray(0, dtype=jnp.int32),
         ),
     )
+    previous_metrics = state.metrics
     state, reward = _process_events_at_time(state, params, jnp.asarray(0.0, dtype=jnp.float32))
     state, reward = _advance_until_decision(state, params, reward)
-    state = _add_transition_reward(state, reward)
+    state, reward = _finalize_transition_reward(previous_metrics, state, params, reward)
     return state, _make_timestep(state, params, reward, state.time_seconds - start)
 
 
@@ -187,15 +222,21 @@ def step(state: EnvState, action, params: EnvParams) -> tuple[EnvState, Timestep
     previous_time = state.time_seconds
 
     def do_step(s: EnvState):
+        previous_metrics = s.metrics
         applied = _apply_policy_action(s, action, params)
         next_state, reward = _process_events_at_time(applied, params, jnp.asarray(0.0, dtype=jnp.float32))
         next_state, reward = _advance_until_decision(next_state, params, reward)
         next_state = next_state.replace(step_count=next_state.step_count + 1)
-        next_state = _add_transition_reward(next_state, reward)
+        next_state, reward = _finalize_transition_reward(previous_metrics, next_state, params, reward)
         return next_state, reward
 
     def noop(s: EnvState):
-        return s, jnp.asarray(0.0, dtype=jnp.float32)
+        return _finalize_transition_reward(
+            s.metrics,
+            s,
+            params,
+            jnp.asarray(0.0, dtype=jnp.float32),
+        )
 
     state, reward = jax.lax.cond(
         state.done | (~state.decision_required),
@@ -232,6 +273,10 @@ def _route_within_edge_range(
     target = jnp.clip(jnp.asarray(target_node, dtype=jnp.int32), 0, graph.num_nodes - 1)
     current = jnp.clip(jnp.asarray(source_nodes, dtype=jnp.int32), 0, graph.num_nodes - 1)
     reached = current == target
+    if int(max_route_edges) >= max(0, graph.num_nodes - 1):
+        if graph.routing_travel_time_s.shape == (graph.num_nodes, graph.num_nodes):
+            return jnp.isfinite(graph.routing_travel_time_s[current, target])
+        return jnp.ones_like(reached, dtype=jnp.bool_)
 
     def body(_, carry):
         node, done = carry
@@ -318,6 +363,8 @@ def _advance_until_decision(
         next_time = _next_event_time(loop_state, params)
         episode_end = params.start_time_seconds + params.episode_seconds
         event_time = jnp.minimum(next_time, episode_end)
+        interval_seconds = jnp.maximum(0.0, event_time - loop_state.time_seconds)
+        loop_state = _accrue_waiting_seconds(loop_state, interval_seconds)
         loop_state = loop_state.replace(time_seconds=event_time)
 
         def finish_episode(s):
@@ -786,6 +833,7 @@ def _record_pickup_wait(state: EnvState, request_id) -> EnvState:
     wait = _pickup_wait_seconds(state, request_id)
     slot = jnp.mod(state.metrics.recent_pickup_wait_index, _RECENT_PICKUP_WAIT_WINDOW)
     metrics = state.metrics.replace(
+        picked_up_requests=state.metrics.picked_up_requests + jnp.asarray(1, dtype=jnp.int32),
         pickup_wait_seconds=state.metrics.pickup_wait_seconds + wait,
         recent_pickup_wait_seconds=state.metrics.recent_pickup_wait_seconds.at[slot].set(wait),
         recent_pickup_wait_count=jnp.minimum(
@@ -800,11 +848,69 @@ def _record_pickup_wait(state: EnvState, request_id) -> EnvState:
     return state.replace(metrics=metrics)
 
 
-def _add_transition_reward(state: EnvState, reward) -> EnvState:
+def _reward_mode_code(params: EnvParams) -> int:
+    return (
+        REWARD_MODE_DENSE_CODE
+        if params.reward_mode == REWARD_MODE_DENSE_WAIT
+        else REWARD_MODE_LEGACY_CODE
+    )
+
+
+def _waiting_request_count(state: EnvState):
+    # Assigned requests have left the queue, but passengers are still waiting
+    # until pickup. Counting both statuses makes dense reward align with
+    # pickup wait time without reintroducing a sparse pickup-only penalty.
+    waiting = (state.request_status == REQUEST_QUEUED) | (state.request_status == REQUEST_ASSIGNED)
+    return waiting.sum().astype(jnp.float32)
+
+
+def _accrue_waiting_seconds(state: EnvState, dt_seconds) -> EnvState:
+    waited = _waiting_request_count(state) * jnp.asarray(dt_seconds, dtype=jnp.float32)
     metrics = state.metrics.replace(
-        aggregate_reward=state.metrics.aggregate_reward + jnp.asarray(reward, dtype=jnp.float32)
+        queued_wait_seconds=state.metrics.queued_wait_seconds + waited,
     )
     return state.replace(metrics=metrics)
+
+
+def _finalize_transition_reward(
+    previous_metrics: EnvMetrics,
+    state: EnvState,
+    params: EnvParams,
+    legacy_reward,
+) -> tuple[EnvState, jnp.ndarray]:
+    queued_wait_delta = jnp.maximum(
+        0.0,
+        state.metrics.queued_wait_seconds - previous_metrics.queued_wait_seconds,
+    )
+    dropped_delta = jnp.maximum(
+        jnp.asarray(0, dtype=jnp.int32),
+        state.metrics.dropped_requests - previous_metrics.dropped_requests,
+    )
+    pickup_delta = jnp.maximum(
+        jnp.asarray(0, dtype=jnp.int32),
+        state.metrics.picked_up_requests - previous_metrics.picked_up_requests,
+    )
+    dense_wait_penalty = -params.wait_time_scale * queued_wait_delta
+    drop_penalty_reward = -params.drop_penalty * dropped_delta.astype(jnp.float32)
+    pickup_bonus_reward = params.pickup_bonus * pickup_delta.astype(jnp.float32)
+    dense_reward = dense_wait_penalty + drop_penalty_reward + pickup_bonus_reward
+    reward = (
+        dense_reward
+        if params.reward_mode == REWARD_MODE_DENSE_WAIT
+        else jnp.asarray(legacy_reward, dtype=jnp.float32)
+    )
+    metrics = state.metrics.replace(
+        aggregate_reward=state.metrics.aggregate_reward + jnp.asarray(reward, dtype=jnp.float32),
+        dense_wait_penalty=state.metrics.dense_wait_penalty + dense_wait_penalty,
+        drop_penalty_reward=state.metrics.drop_penalty_reward + drop_penalty_reward,
+        pickup_bonus_reward=state.metrics.pickup_bonus_reward + pickup_bonus_reward,
+        last_dense_wait_penalty=dense_wait_penalty,
+        last_drop_penalty_reward=drop_penalty_reward,
+        last_pickup_bonus_reward=pickup_bonus_reward,
+        last_queued_wait_seconds=queued_wait_delta,
+        reward_mode=jnp.asarray(_reward_mode_code(params), dtype=jnp.int32),
+    )
+    return state.replace(metrics=metrics), jnp.asarray(reward, dtype=jnp.float32)
 
 
 def _start_auto_edge(
@@ -851,13 +957,16 @@ def _refresh_decision(state: EnvState, params: EnvParams) -> EnvState:
 
 
 def _make_timestep(state: EnvState, params: EnvParams, reward, dt_seconds) -> Timestep:
-    discount = jnp.where(state.done, 0.0, params.gamma)
+    dt_seconds = jnp.asarray(dt_seconds, dtype=jnp.float32)
+    reference_seconds = jnp.maximum(params.time_discount_reference_seconds, 1.0e-6)
+    discount = params.gamma ** (dt_seconds / reference_seconds)
+    discount = jnp.where(state.done, 0.0, discount)
     return Timestep(
         observation=build_observation(state, params),
         reward=jnp.asarray(reward, dtype=jnp.float32),
         discount=jnp.asarray(discount, dtype=jnp.float32),
         done=state.done,
-        dt_seconds=jnp.asarray(dt_seconds, dtype=jnp.float32),
+        dt_seconds=dt_seconds,
         metrics=state.metrics,
     )
 

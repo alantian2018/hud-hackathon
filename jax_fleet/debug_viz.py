@@ -13,6 +13,7 @@ from PIL import Image
 
 from jax_fleet.env import make_env_params, reset, step
 from jax_fleet.graph import build_synthetic_graph, load_public_data_graph
+from jax_fleet.heuristics import choose_marginal_value_action
 from jax_fleet.scene_export import export_scene
 
 
@@ -100,7 +101,7 @@ def run_debug_demo(
         plt.pause(pause_seconds)
 
     for _ in range(steps):
-        action = _choose_action(np.asarray(timestep.observation.action_mask), policy, action_rng)
+        action = _choose_action(timestep.observation, policy, action_rng)
         state, timestep = step(state, jnp.asarray(action, dtype=jnp.int32), params)
         scenes.append(export_scene(state, timestep, params))
         if show and live_ax is not None and live_fig is not None:
@@ -151,7 +152,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--max-requests", default=64, type=int)
     parser.add_argument("--spawn-rate-per-minute", default=1.0, type=float)
     parser.add_argument("--episode-seconds", default=1800.0, type=float)
-    parser.add_argument("--policy", choices=["first", "random"], default="first")
+    parser.add_argument("--policy", choices=["first", "random", "heuristic"], default="first")
     parser.add_argument("--fps", default=4, type=int)
     parser.add_argument("--show", action="store_true")
     parser.add_argument("--no-save", action="store_true")
@@ -214,7 +215,10 @@ def _render_scene_image(scene: dict[str, Any]) -> Image.Image:
     return image
 
 
-def _choose_action(mask: np.ndarray, policy: str, rng: np.random.Generator) -> int:
+def _choose_action(observation, policy: str, rng: np.random.Generator) -> int:
+    if policy == "heuristic":
+        return int(np.asarray(choose_marginal_value_action(observation)))
+    mask = np.asarray(observation.action_mask, dtype=bool)
     valid = np.flatnonzero(mask)
     if len(valid) == 0:
         return 0

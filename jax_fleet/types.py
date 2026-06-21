@@ -41,7 +41,9 @@ class EnvParams:
     raster_size: int = struct.field(pytree_node=False, default=50)
     max_event_steps: int = struct.field(pytree_node=False, default=512)
     target_active_requests: int = struct.field(pytree_node=False, default=0)
-    assignment_max_route_edges: int = struct.field(pytree_node=False, default=15)
+    assignment_max_route_edges: int = struct.field(pytree_node=False, default=10000)
+    reward_mode: str = struct.field(pytree_node=False, default="dense_wait")
+    observation_mode: str = struct.field(pytree_node=False, default="learning_v1")
     initial_car_nodes: Array = struct.field(default_factory=lambda: jnp.zeros((1,), jnp.int32))
     start_time_seconds: Array = struct.field(default_factory=lambda: jnp.asarray(0.0, jnp.float32))
     episode_seconds: Array = struct.field(default_factory=lambda: jnp.asarray(3600.0, jnp.float32))
@@ -53,7 +55,12 @@ class EnvParams:
         default_factory=lambda: jnp.asarray(2.0 * 3600.0, jnp.float32)
     )
     wait_time_scale: Array = struct.field(default_factory=lambda: jnp.asarray(1.0 / 60.0, jnp.float32))
+    drop_penalty: Array = struct.field(default_factory=lambda: jnp.asarray(10.0, jnp.float32))
+    pickup_bonus: Array = struct.field(default_factory=lambda: jnp.asarray(0.0, jnp.float32))
     gamma: Array = struct.field(default_factory=lambda: jnp.asarray(0.99, jnp.float32))
+    time_discount_reference_seconds: Array = struct.field(
+        default_factory=lambda: jnp.asarray(60.0, jnp.float32)
+    )
     preplanned_spawn_times: Array = struct.field(default_factory=lambda: jnp.zeros((0,), jnp.float32))
     preplanned_origin_nodes: Array = struct.field(default_factory=lambda: jnp.zeros((0,), jnp.int32))
     preplanned_dest_nodes: Array = struct.field(default_factory=lambda: jnp.zeros((0,), jnp.int32))
@@ -76,9 +83,19 @@ class EnvMetrics:
     invalid_actions: Array
     dropped_requests: Array
     completed_requests: Array
+    picked_up_requests: Array
     queued_requests: Array
     pickup_wait_seconds: Array
     aggregate_reward: Array
+    dense_wait_penalty: Array
+    drop_penalty_reward: Array
+    pickup_bonus_reward: Array
+    queued_wait_seconds: Array
+    last_dense_wait_penalty: Array
+    last_drop_penalty_reward: Array
+    last_pickup_bonus_reward: Array
+    last_queued_wait_seconds: Array
+    reward_mode: Array
     recent_pickup_wait_seconds: Array
     recent_pickup_wait_count: Array
     recent_pickup_wait_index: Array

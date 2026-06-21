@@ -4,3 +4,8 @@ cache
 public
 __pycache__
 runs
+*.egg-info
+checkpoints
+logs
+renders
+wandb

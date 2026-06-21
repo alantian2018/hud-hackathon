@@ -11,6 +11,8 @@ import numpy as np
 
 from jax_fleet.env import make_env_params, reset as functional_reset, step as functional_step
 from jax_fleet.graph import build_synthetic_graph, load_public_data_graph
+from jax_fleet.heuristics import choose_marginal_value_action
+from jax_fleet.ppo.policy import load_checkpoint_policy, resolve_policy_checkpoint_path
 from jax_fleet.rich_renderer import PygletWindowRenderer, RichRenderer
 from jax_fleet.scene_export import export_scene
 from jax_fleet.spawns import make_spawned_env_params
@@ -32,9 +34,14 @@ class JaxFleetEnv:
         max_requests: int = 64,
         initial_car_nodes: list[int] | np.ndarray | None = None,
         spawn_rate_per_minute: float = 0.0,
-        assignment_max_route_edges: int = 15,
+        assignment_max_route_edges: int = 10000,
         episode_seconds: float = 1800.0,
         start_time_seconds: float = 0.0,
+        reward_mode: str = "dense_wait",
+        observation_mode: str = "learning_v1",
+        drop_penalty: float = 10.0,
+        pickup_bonus: float = 0.0,
+        time_discount_reference_seconds: float = 60.0,
         render_width: int = 1280,
         render_height: int = 800,
         render_scale: int = 1,
@@ -50,6 +57,11 @@ class JaxFleetEnv:
             assignment_max_route_edges=assignment_max_route_edges,
             episode_seconds=episode_seconds,
             start_time_seconds=start_time_seconds,
+            reward_mode=reward_mode,
+            observation_mode=observation_mode,
+            drop_penalty=drop_penalty,
+            pickup_bonus=pickup_bonus,
+            time_discount_reference_seconds=time_discount_reference_seconds,
         )
         self.seed = int(seed)
         self._rng = jax.random.PRNGKey(self.seed)
@@ -190,6 +202,11 @@ def main(argv: list[str] | None = None) -> int:
         assignment_max_route_edges=args.assignment_max_route_edges,
         episode_seconds=args.episode_seconds,
         start_time_seconds=args.start_time_seconds,
+        reward_mode=args.reward_mode,
+        observation_mode=args.observation_mode,
+        drop_penalty=args.drop_penalty,
+        pickup_bonus=args.pickup_bonus,
+        time_discount_reference_seconds=args.time_discount_reference_seconds,
     )
     env = JaxFleetEnv(
         graph=graph,
@@ -202,11 +219,35 @@ def main(argv: list[str] | None = None) -> int:
         use_jit=args.jit,
     )
     env.reset()
+    checkpoint_policy = None
+    if args.policy == "checkpoint" or args.policy_checkpoint is not None:
+        checkpoint_path = resolve_policy_checkpoint_path(
+            args.policy_checkpoint,
+            checkpoint_dir=args.policy_checkpoint_dir,
+        )
+        checkpoint_policy = load_checkpoint_policy(
+            checkpoint_path,
+            env.timestep.observation,
+            max_degree=graph.max_degree,
+            use_jit=args.jit,
+        )
+        print(
+            "loaded policy checkpoint path={path} update={update}".format(
+                path=checkpoint_policy.path,
+                update=checkpoint_policy.update if checkpoint_policy.update is not None else "unknown",
+            ),
+            flush=True,
+        )
     env.render(mode="human")
 
     steps = 0
     try:
-        while not env.done and env.human_window_open and _within_step_limit(steps, args.max_steps):
+        while (
+            not env.done
+            and env.human_window_open
+            and _within_step_limit(steps, args.max_steps)
+            and _within_pickup_limit(env, args.max_pickups)
+        ):
             started = time.perf_counter()
             frame_steps = 0
             while (
@@ -214,8 +255,9 @@ def main(argv: list[str] | None = None) -> int:
                 and not env.done
                 and env.human_window_open
                 and _within_step_limit(steps, args.max_steps)
+                and _within_pickup_limit(env, args.max_pickups)
             ):
-                action = env.sample_random_action()
+                action = _choose_live_action(env, args.policy, checkpoint_policy)
                 _, reward, done, info = env.step(action)
                 steps += 1
                 frame_steps += 1
@@ -240,21 +282,33 @@ def main(argv: list[str] | None = None) -> int:
     finally:
         env.close()
 
-    print(f"live render loop exited after {steps} random policy steps")
+    print(f"live render loop exited after {steps} {args.policy} policy steps")
     return 0
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Run a live Gym-style JAX Fleet render loop.")
     parser.add_argument("--graph", choices=["synthetic", "sf"], default="sf")
-    parser.add_argument("--data-dir", default="public/data")
+    parser.add_argument("--data-dir", default="dist/data")
     parser.add_argument("--cache-dir", default="cache/jax_fleet")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-cars", type=int, default=40)
     parser.add_argument("--max-requests", type=int, default=32)
-    parser.add_argument("--assignment-max-route-edges", type=int, default=15)
+    parser.add_argument("--assignment-max-route-edges", type=int, default=10000)
     parser.add_argument("--spawn-rate-per-minute", type=float, default=0.0)
     parser.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
+    parser.add_argument("--reward-mode", choices=["dense_wait", "legacy_pickup_wait"], default="dense_wait")
+    parser.add_argument("--observation-mode", choices=["learning_v1", "legacy"], default="learning_v1")
+    parser.add_argument("--drop-penalty", type=float, default=10.0)
+    parser.add_argument("--pickup-bonus", type=float, default=0.0)
+    parser.add_argument("--time-discount-reference-seconds", type=float, default=60.0)
+    parser.add_argument("--policy", choices=["random", "first", "heuristic", "checkpoint"], default="random")
+    parser.add_argument(
+        "--policy-checkpoint",
+        default=None,
+        help='Checkpoint path to load, or "latest" to resolve from --policy-checkpoint-dir.',
+    )
+    parser.add_argument("--policy-checkpoint-dir", default="runs/jax_fleet/sf/checkpoints")
     parser.add_argument("--episode-seconds", type=float, default=float("inf"))
     parser.add_argument("--start-time-seconds", type=float, default=7.0 * 3600.0)
     parser.add_argument(
@@ -262,6 +316,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
         type=int,
         default=None,
         help="Optional policy-step cap. Omit or pass 0 for an endless live loop.",
+    )
+    parser.add_argument(
+        "--max-pickups",
+        type=int,
+        default=None,
+        help="Optional pickup cap. Omit or pass 0 to disable.",
     )
     parser.add_argument("--fps", type=float, default=12.0)
     parser.add_argument("--sim-steps-per-render", type=int, default=1)
@@ -295,6 +355,24 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 def _within_step_limit(steps: int, max_steps: int | None) -> bool:
     return max_steps is None or int(max_steps) <= 0 or int(steps) < int(max_steps)
+
+
+def _within_pickup_limit(env: JaxFleetEnv, max_pickups: int | None) -> bool:
+    if max_pickups is None or int(max_pickups) <= 0:
+        return True
+    return int(np.asarray(env.state.metrics.picked_up_requests)) < int(max_pickups)
+
+
+def _choose_live_action(env: JaxFleetEnv, policy: str, checkpoint_policy) -> int:
+    if checkpoint_policy is not None:
+        return checkpoint_policy.action(env.timestep.observation)
+    if policy == "heuristic":
+        return int(np.asarray(choose_marginal_value_action(env.timestep.observation)))
+    if policy == "first":
+        mask = np.asarray(env.timestep.observation.action_mask, dtype=bool)
+        valid = np.flatnonzero(mask)
+        return int(valid[0]) if len(valid) else 0
+    return env.sample_random_action()
 
 
 def _render_size(width: int, height: int, *, fullscreen: bool) -> tuple[int, int]:
