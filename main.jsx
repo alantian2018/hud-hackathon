@@ -5,7 +5,7 @@ import {TripsLayer} from "@deck.gl/geo-layers";
 import {GeoJsonLayer, ScatterplotLayer, IconLayer} from "@deck.gl/layers";
 import {StaticMap} from "react-map-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-import { Analytics } from "@vercel/analytics/next"
+import { Analytics } from "@vercel/analytics/react";
 
 const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY || "4WonZ3glTzG3MWfQd6gQ";
 const POPULATION_HOURLY_MULTIPLIER = [
@@ -2475,4 +2475,9 @@ const root = document.createElement("div");
 document.body.style.margin = 0;
 document.body.appendChild(root);
 
-createRoot(root).render(<App />);
+createRoot(root).render(
+  <>
+    <App />
+    <Analytics />
+  </>
+);

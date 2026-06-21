@@ -4,7 +4,7 @@ import DeckGL from "@deck.gl/react";
 import {GeoJsonLayer, ScatterplotLayer} from "@deck.gl/layers";
 import {StaticMap} from "react-map-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-import { Analytics } from "@vercel/analytics/next"
+import { Analytics } from "@vercel/analytics/react";
 
 
 const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY || "4WonZ3glTzG3MWfQd6gQ";
@@ -2070,4 +2070,9 @@ const root = document.createElement("div");
 document.body.appendChild(root);
 const path = window.location.pathname;
 const mode = path.includes("greedy.html") ? "greedy" : path.includes("rl.html") ? "rl" : "compare";
-createRoot(root).render(<ComparisonShell mode={mode} />);
+createRoot(root).render(
+  <>
+    <ComparisonShell mode={mode} />
+    <Analytics />
+  </>
+);
