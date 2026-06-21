@@ -860,60 +860,63 @@ function maxHeatValue(cells) {
   return (cells ?? []).reduce((max, cell) => Math.max(max, Number(cell.value) || 0), 0);
 }
 
-function buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinute, done}) {
-  const summary = snapshot?.summary ?? {};
-  const dispatch = summary.dispatch ?? snapshot?.map_dispatch?.summary ?? zeroDispatchSummary();
-  const stats = metricsFor(snapshot, "rl");
+function buildHudTraceRows({snapshot, previewSnapshot, finalSnapshot, world, scenario, clockMinute, done}) {
+  const isPreFrame = snapshot?.is_pre_frame || clockMinute < 0;
+  const traceSnapshot = isPreFrame && previewSnapshot ? previewSnapshot : snapshot;
+  const summary = traceSnapshot?.summary ?? {};
+  const dispatch = summary.dispatch ?? traceSnapshot?.map_dispatch?.summary ?? zeroDispatchSummary();
+  const stats = metricsFor(traceSnapshot, "rl");
   const finalStats = metricsFor(finalSnapshot, "rl");
   const fleetSize = Number(world?.fleet_size ?? 40);
   const activeCars = Number(dispatch.num_active_cars ?? stats.active_cars ?? 0);
   const repositions = Number(dispatch.num_new_repositions ?? dispatch.num_repositions ?? 0);
   const assignments = Number(dispatch.num_new_assignments ?? dispatch.num_assignments ?? 0);
   const holds = Math.max(0, fleetSize - activeCars);
-  const newRequests = Number(summary.num_new_people ?? snapshot?.new_people?.length ?? 0);
+  const newRequests = Number(summary.num_new_people ?? traceSnapshot?.new_people?.length ?? 0);
   const topDemand = summary.top_demand_cells ?? [];
   const traffic = summary.traffic_bottlenecks ?? [];
-  const stepLabel = snapshot?.is_pre_frame || clockMinute < 0 ? "pre-frame" : formatClock(clockMinute);
+  const stepLabel = isPreFrame ? "pre-frame" : formatClock(clockMinute);
+  const requestLabel = isPreFrame ? "preview_requests" : "requests";
 
   const rows = [
     {
       tool: "mobility_tools.observe_state",
       call: "observe_state(episode_id)",
-      output: `t=${stepLabel}; requests=${newRequests}; active=${activeCars}; idle_or_held=${holds}; unassigned=${dispatch.num_unassigned_people ?? 0}`
+      output: `t=${stepLabel}; ${requestLabel}=${newRequests}; active=${activeCars}; idle_or_held=${holds}; unassigned=${dispatch.num_unassigned_people ?? 0}`
     }
   ];
 
-  if (snapshot?.is_pre_frame || clockMinute < 0) {
+  if (isPreFrame) {
     rows.push(
       {
         tool: "mobility_tools.forecast_hotspots",
         call: "forecast_hotspots(episode_id, lookahead_steps=3, k=8)",
-        output: `hotspots=queued for ${scenario.label}; traffic=queued; waiting for Start Both`
+        output: `hotspots=${topCellsLabel(topDemand)}; traffic=${topCellsLabel(traffic, 2)}; staged before Start Both`
       },
       {
         tool: "mobility_tools.propose_full_plan",
         call: "propose_full_plan(episode_id)",
-        output: `candidate_plan={assignments:0, repositions:0, holds:${fleetSize}}; goal=${scenario.agentChallenge}`
+        output: `candidate_plan={assignments:${assignments}, repositions:${repositions}, holds:${holds}}; goal=${scenario.agentChallenge}`
       },
       {
         tool: "mobility_tools.propose_matching",
         call: "propose_matching(episode_id)",
-        output: "0 assignment candidates before requests enter the frame"
+        output: `${assignments} preview assignments; sample=${sampleAssignments(traceSnapshot)}`
       },
       {
         tool: "mobility_tools.propose_repositioning",
-        call: "propose_repositioning(episode_id, assigned_car_ids_json=[])",
-        output: `0 repositions before clock start; standby supply=${fleetSize}`
+        call: "propose_repositioning(episode_id, assigned_car_ids_json=[...])",
+        output: `${repositions} preview repositions; sample=${sampleRepositions(traceSnapshot)}`
       },
       {
         tool: "mobility_tools.critique_action_plan",
         call: "critique_action_plan(episode_id, plan_json={...})",
-        output: `${scenario.failureMode}; plan held until simulation start`
+        output: `${scenario.failureMode}; max traffic pressure=${valueLabel(maxHeatValue(traffic))}; override=${scenario.override}`
       },
       {
         tool: "mobility_tools.step_world",
         call: "step_world(episode_id, plan_json={assignments,repositions,holds})",
-        output: "not advanced yet; first step applies when Start Both is pressed"
+        output: `ready_plan_counts={assignments:${assignments}, repositions:${repositions}, holds:${holds}}; first step applies when Start Both is pressed`
       }
     );
     return rows;
@@ -1304,12 +1307,12 @@ function MapLegend() {
   );
 }
 
-function AgentTracePanel({snapshot, finalSnapshot, world, event, clockMinute, done}) {
+function AgentTracePanel({snapshot, previewSnapshot, finalSnapshot, world, event, clockMinute, done}) {
   const [open, setOpen] = useState(true);
   const scenario = traceScenarioForEvent(event);
   const rows = useMemo(
-    () => buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinute, done}),
-    [snapshot, finalSnapshot, world, scenario, clockMinute, done]
+    () => buildHudTraceRows({snapshot, previewSnapshot, finalSnapshot, world, scenario, clockMinute, done}),
+    [snapshot, previewSnapshot, finalSnapshot, world, scenario, clockMinute, done]
   );
 
   return (
@@ -1922,6 +1925,7 @@ function ComparisonShell({mode}) {
 
   const greedySnapshot = snapshotAt(greedySnapshots, clockMinute);
   const rlSnapshot = snapshotAt(rlSnapshots, clockMinute);
+  const rlPreviewSnapshot = rlSnapshots.find(snapshot => !snapshot?.is_pre_frame) ?? rlSnapshot;
   const finalGreedySnapshot = greedySnapshots.at(-1);
   const finalRlSnapshot = rlSnapshots.at(-1);
   const compare = mode === "compare";
@@ -2015,6 +2019,7 @@ function ComparisonShell({mode}) {
       {mode !== "greedy" && (
         <AgentTracePanel
           snapshot={rlSnapshot}
+          previewSnapshot={rlPreviewSnapshot}
           finalSnapshot={finalRlSnapshot}
           world={data.rlWorld}
           event={activeEvent}
