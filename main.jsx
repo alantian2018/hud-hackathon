@@ -5,7 +5,7 @@ import {TripsLayer} from "@deck.gl/geo-layers";
 import {GeoJsonLayer, ScatterplotLayer, IconLayer} from "@deck.gl/layers";
 import {StaticMap} from "react-map-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
-
+import { Analytics } from "@vercel/analytics/next"
 
 const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY || "4WonZ3glTzG3MWfQd6gQ";
 const POPULATION_HOURLY_MULTIPLIER = [

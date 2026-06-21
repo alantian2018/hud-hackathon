@@ -1,0 +1,14 @@
+jax
+flax
+optax
+orbax-checkpoint
+numpy
+scipy
+networkx
+matplotlib
+pillow
+pyglet
+pytest
+
+[map]
+osmnx

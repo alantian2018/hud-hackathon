@@ -1,0 +1,3 @@
+[console_scripts]
+jax-fleet = jax_fleet.cli:main
+jax-fleet-live = jax_fleet.gym_env:main

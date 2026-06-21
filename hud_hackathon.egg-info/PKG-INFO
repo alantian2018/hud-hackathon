@@ -1,0 +1,18 @@
+Metadata-Version: 2.4
+Name: hud-hackathon
+Version: 0.1.0
+Summary: Headless JAX fleet repositioning backend beside the Deck.gl demo.
+Requires-Python: >=3.11
+Requires-Dist: jax
+Requires-Dist: flax
+Requires-Dist: optax
+Requires-Dist: orbax-checkpoint
+Requires-Dist: numpy
+Requires-Dist: scipy
+Requires-Dist: networkx
+Requires-Dist: matplotlib
+Requires-Dist: pillow
+Requires-Dist: pyglet
+Requires-Dist: pytest
+Provides-Extra: map
+Requires-Dist: osmnx; extra == "map"

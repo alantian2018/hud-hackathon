@@ -4,6 +4,8 @@ import DeckGL from "@deck.gl/react";
 import {GeoJsonLayer, ScatterplotLayer} from "@deck.gl/layers";
 import {StaticMap} from "react-map-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
+import { Analytics } from "@vercel/analytics/next"
+
 
 const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY || "4WonZ3glTzG3MWfQd6gQ";
 const DAY_MINUTES = 24 * 60;
