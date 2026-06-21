@@ -1,6 +1,8 @@
 # FleetForge Demo
 
-![FleetForge demo](assets/fleetforge.gif)
+<p align="center">
+  <img src="assets/fleetforge.gif" />
+</p>
 
 FleetForge is a HUD-trained fleet orchestration environment for comparing a reactive greedy dispatcher against an Agentic RL Fleet on the same San Francisco road network, vehicle supply, demand stream, and event stress tests.
 
