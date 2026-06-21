@@ -1240,14 +1240,14 @@ function ControlBar({
                 </button>
               );
             })}
+            {compare && activeEvent && (
+              <ScenarioCard
+                details={scenarioDetailsFor(activeEvent)}
+                open={scenarioCardOpen}
+                onToggle={onToggleScenarioCard}
+              />
+            )}
           </div>
-        )}
-        {compare && activeEvent && (
-          <ScenarioCard
-            details={scenarioDetailsFor(activeEvent)}
-            open={scenarioCardOpen}
-            onToggle={onToggleScenarioCard}
-          />
         )}
         <TrafficLegend />
       </div>
@@ -1257,85 +1257,64 @@ function ControlBar({
 
 function ScenarioCard({details, open, onToggle}) {
   return (
-    <section style={{
-      width: 470,
-      maxWidth: "min(470px, calc(100vw - 28px))",
-      borderRadius: 8,
-      border: "1px solid rgba(125,211,252,0.28)",
-      background: "rgba(10,16,28,0.78)",
-      color: "white",
-      overflow: "hidden",
-      boxShadow: "0 14px 34px rgba(0,0,0,0.24)"
-    }}>
+    <div style={{display: "inline-flex", alignItems: "center", gap: 6, flexWrap: "wrap", justifyContent: "flex-end"}}>
       <button
         type="button"
         onClick={onToggle}
         aria-expanded={open}
         style={{
-          width: "100%",
           display: "flex",
           alignItems: "center",
-          justifyContent: "space-between",
-          gap: 10,
-          padding: "9px 11px",
-          border: 0,
-          background: "transparent",
+          gap: 7,
+          padding: "7px 9px",
+          borderRadius: 7,
+          border: "1px solid rgba(125,211,252,0.24)",
+          background: "rgba(15,23,42,0.72)",
           color: "white",
           cursor: "pointer",
-          textAlign: "left"
+          fontSize: 12,
+          fontWeight: 800
         }}
       >
-        <span style={{minWidth: 0}}>
-          <span style={{display: "block", fontSize: 11, opacity: 0.58, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0}}>
-            Scenario
-          </span>
-          <span style={{display: "block", fontSize: 14, fontWeight: 850, color: "#bae6fd", whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"}}>
-            {details.scenario}
-          </span>
-        </span>
-        <span style={{
-          flex: "0 0 auto",
-          minWidth: 58,
-          padding: "5px 7px",
-          borderRadius: 7,
-          border: "1px solid rgba(148,163,184,0.28)",
-          background: "rgba(15,23,42,0.86)",
-          color: "rgba(255,255,255,0.78)",
-          fontSize: 12,
-          fontWeight: 800,
-          textAlign: "center"
-        }}>
-          {open ? "Hide" : "Show"}
-        </span>
+        <span style={{opacity: 0.62}}>Scenario</span>
+        <span style={{color: "#bae6fd"}}>{details.scenario}</span>
+        <span style={{opacity: 0.7}}>{open ? "Hide" : "Details"}</span>
       </button>
       {open && (
-        <div style={{
-          display: "grid",
-          gridTemplateColumns: "minmax(95px, max-content) minmax(0, 1fr)",
-          rowGap: 7,
-          columnGap: 10,
-          padding: "0 11px 11px",
-          fontSize: 12,
-          lineHeight: 1.25
-        }}>
-          <ScenarioField label="Stress type" value={details.stressType} />
-          <ScenarioField label="Failure mode" value={details.failureMode} />
-          <ScenarioField label="Agent challenge" value={details.agentChallenge} />
-        </div>
+        <>
+          <ScenarioField label="Stress" value={details.stressType} />
+          <ScenarioField label="Failure" value={details.failureMode} />
+          <ScenarioField label="Challenge" value={details.agentChallenge} />
+        </>
       )}
-    </section>
+    </div>
   );
 }
 
 function ScenarioField({label, value}) {
   return (
-    <>
-      <div style={{color: "rgba(203,213,225,0.64)", fontWeight: 800}}>{label}</div>
-      <div style={{color: "rgba(255,255,255,0.86)", fontWeight: 650}}>{value}</div>
-    </>
+    <span style={{
+      display: "inline-flex",
+      alignItems: "center",
+      gap: 5,
+      maxWidth: 245,
+      padding: "6px 8px",
+      borderRadius: 7,
+      border: "1px solid rgba(148,163,184,0.18)",
+      background: "rgba(15,23,42,0.54)",
+      color: "rgba(255,255,255,0.82)",
+      fontSize: 12,
+      lineHeight: 1.15
+    }}>
+      <span style={{color: "rgba(203,213,225,0.58)", fontWeight: 850}}>
+        {label}
+      </span>
+      <span style={{fontWeight: 700, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis"}}>
+        {value}
+      </span>
+    </span>
   );
 }
-
 const buttonStyle = {
   padding: "9px 11px",
   border: "1px solid rgba(148,163,184,0.34)",
@@ -1373,7 +1352,7 @@ function ComparisonShell({compare}) {
   const [running, setRunning] = useState(false);
   const [speed, setSpeed] = useState(0.5);
   const [activeEventId, setActiveEventId] = useState(null);
-  const [scenarioCardOpen, setScenarioCardOpen] = useState(true);
+  const [scenarioCardOpen, setScenarioCardOpen] = useState(false);
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
 
   const events = useMemo(
@@ -1442,7 +1421,7 @@ function ComparisonShell({compare}) {
   };
   const onEventChange = nextEventId => {
     setActiveEventId(nextEventId);
-    setScenarioCardOpen(Boolean(nextEventId));
+    setScenarioCardOpen(false);
     setClockMinute(PRE_FRAME_MINUTE);
     setRunning(false);
   };
