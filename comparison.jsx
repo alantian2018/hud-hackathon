@@ -860,7 +860,7 @@ function maxHeatValue(cells) {
   return (cells ?? []).reduce((max, cell) => Math.max(max, Number(cell.value) || 0), 0);
 }
 
-function buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinute, stepMinutes, done}) {
+function buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinute, done}) {
   const summary = snapshot?.summary ?? {};
   const dispatch = summary.dispatch ?? snapshot?.map_dispatch?.summary ?? zeroDispatchSummary();
   const stats = metricsFor(snapshot, "rl");
@@ -873,15 +873,9 @@ function buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinut
   const newRequests = Number(summary.num_new_people ?? snapshot?.new_people?.length ?? 0);
   const topDemand = summary.top_demand_cells ?? [];
   const traffic = summary.traffic_bottlenecks ?? [];
-  const eventArg = scenario.eventId ? `"${scenario.eventId}"` : "null";
   const stepLabel = snapshot?.is_pre_frame || clockMinute < 0 ? "pre-frame" : formatClock(clockMinute);
 
   const rows = [
-    {
-      tool: "mobility_tools.create_episode",
-      call: `create_episode(event_id=${eventArg}, fleet_size=${fleetSize}, step_minutes=${stepMinutes})`,
-      output: `scenario=${scenario.label}; stress=${scenario.stress}`
-    },
     {
       tool: "mobility_tools.observe_state",
       call: "observe_state(episode_id)",
@@ -903,6 +897,11 @@ function buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinut
       tool: "mobility_tools.forecast_hotspots",
       call: "forecast_hotspots(episode_id, lookahead_steps=3, k=8)",
       output: `hotspots=${topCellsLabel(topDemand)}; traffic=${topCellsLabel(traffic, 2)}`
+    },
+    {
+      tool: "mobility_tools.propose_full_plan",
+      call: "propose_full_plan(episode_id)",
+      output: `candidate_plan={assignments:${assignments}, repositions:${repositions}, holds:${holds}}; goal=${scenario.agentChallenge}`
     },
     {
       tool: "mobility_tools.propose_matching",
@@ -1278,12 +1277,12 @@ function MapLegend() {
   );
 }
 
-function AgentTracePanel({snapshot, finalSnapshot, world, event, clockMinute, stepMinutes, done}) {
+function AgentTracePanel({snapshot, finalSnapshot, world, event, clockMinute, done}) {
   const [open, setOpen] = useState(false);
   const scenario = traceScenarioForEvent(event);
   const rows = useMemo(
-    () => buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinute, stepMinutes, done}),
-    [snapshot, finalSnapshot, world, scenario, clockMinute, stepMinutes, done]
+    () => buildHudTraceRows({snapshot, finalSnapshot, world, scenario, clockMinute, done}),
+    [snapshot, finalSnapshot, world, scenario, clockMinute, done]
   );
 
   return (
@@ -1977,7 +1976,6 @@ function ComparisonShell({compare}) {
         world={data.rlWorld}
         event={activeEvent}
         clockMinute={clockMinute}
-        stepMinutes={rlStep}
         done={isAtEnd}
       />
       <BusinessImpactOverlay
