@@ -44,6 +44,7 @@ const TRAFFIC_GREEN = [52, 168, 83, 245];
 const TRAFFIC_YELLOW = [251, 188, 4, 245];
 const TRAFFIC_ORANGE = [251, 140, 0, 245];
 const TRAFFIC_RED = [234, 67, 53, 245];
+const FEATURE_GRID_CELL_CACHE = new WeakMap();
 const TRAFFIC_DARK_RED = [165, 14, 14, 250];
 const PICKUP_BLUE = [66, 133, 244, 245];
 const PICKUP_BLUE_FILL = [66, 133, 244, 175];
@@ -355,29 +356,6 @@ function effectiveCongestionForEdge(feature, hour) {
   return 1 + trafficFloor + (base - 1) * displaySensitivity;
 }
 
-function generatedTrafficMultiplierForEdge(feature, snapshot, grid) {
-  const hotspots = snapshot?.summary?.traffic_bottlenecks ?? [];
-  if (!hotspots.length || !grid) return 1;
-
-  const centroid = edgeCentroid(feature);
-  if (!centroid) return 1;
-  const cell = gridCellForPosition([centroid.longitude, centroid.latitude], grid);
-  if (!cell) return 1;
-
-  let influence = 0;
-  for (const hotspot of hotspots) {
-    const row = Number(hotspot.row);
-    const col = Number(hotspot.col);
-    const value = Number(hotspot.value);
-    if (!Number.isFinite(row) || !Number.isFinite(col) || !Number.isFinite(value)) continue;
-    const dist = Math.hypot(cell.row - row, cell.col - col);
-    const local = value * Math.exp(-(dist * dist) / (2 * 2.8 * 2.8));
-    influence = Math.max(influence, local);
-  }
-
-  return 1 + clamp((influence - 0.42) * 0.9, 0, 0.75);
-}
-
 function commuteWaveIntensity(feature, hour) {
   const base = hourlyValue(feature?.properties?.hourly_congestion_factor, hour);
   const intensity = (base - 1) * commuteWaveBoost(feature, hour);
@@ -485,6 +463,47 @@ function gridCellForPosition(position, grid) {
   const col = clamp(Math.floor(((lon - minLon) / (maxLon - minLon)) * cols), 0, cols - 1);
   const row = clamp(Math.floor(((lat - minLat) / (maxLat - minLat)) * rows), 0, rows - 1);
   return {row, col, key: gridKey(row, col)};
+}
+
+function gridCellForFeature(feature, grid) {
+  if (!feature || !grid) return null;
+  const cached = FEATURE_GRID_CELL_CACHE.get(feature);
+  if (cached) return cached;
+  const centroid = edgeCentroid(feature);
+  const cell = centroid ? gridCellForPosition([centroid.longitude, centroid.latitude], grid) : null;
+  if (cell) FEATURE_GRID_CELL_CACHE.set(feature, cell);
+  return cell;
+}
+
+function makeGeneratedTrafficPressureByCell(snapshot, grid) {
+  const hotspots = snapshot?.summary?.traffic_bottlenecks ?? [];
+  if (!hotspots.length || !grid?.rows || !grid?.cols) return null;
+
+  const rows = grid.rows;
+  const cols = grid.cols;
+  const values = new Float32Array(rows * cols);
+  for (let row = 0; row < rows; row++) {
+    for (let col = 0; col < cols; col++) {
+      let influence = 0;
+      for (const hotspot of hotspots) {
+        const hotRow = Number(hotspot.row);
+        const hotCol = Number(hotspot.col);
+        const value = Number(hotspot.value);
+        if (!Number.isFinite(hotRow) || !Number.isFinite(hotCol) || !Number.isFinite(value)) continue;
+        const dist = Math.hypot(row - hotRow, col - hotCol);
+        influence = Math.max(influence, value * Math.exp(-(dist * dist) / (2 * 2.8 * 2.8)));
+      }
+      values[row * cols + col] = 1 + clamp((influence - 0.42) * 0.9, 0, 0.75);
+    }
+  }
+  return {rows, cols, values};
+}
+
+function generatedTrafficMultiplierForEdge(feature, pressureByCell, grid) {
+  if (!pressureByCell || !grid) return 1;
+  const cell = gridCellForFeature(feature, grid);
+  if (!cell) return 1;
+  return pressureByCell.values[cell.row * pressureByCell.cols + cell.col] || 1;
 }
 
 function nearestNodeForPosition(position, nodes) {
@@ -1144,6 +1163,7 @@ function App() {
   const currentHour = Math.floor(normalizedClockMinute / 60);
   const currentMinute = Math.floor(normalizedClockMinute % 60);
   const currentHourFloat = normalizedClockMinute / 60;
+  const trafficDisplayHour = Math.round(currentHourFloat * 4) / 4;
   const clockLabel = `${String(currentHour).padStart(2, "0")}:${String(
     currentMinute
   ).padStart(2, "0")}`;
@@ -1153,14 +1173,15 @@ function App() {
   const mobilityEvents = mobilityWorld?.events ?? [];
   const activeEvent = mobilityEvents.find(event => event.id === activeEventId) ?? null;
   const activeScenario = activeEventId ? mobilityWorld?.event_scenarios?.[activeEventId] : null;
+  const activeSnapshots = useMemo(() => {
+    const snapshots = activeScenario?.snapshots ?? mobilityWorld?.snapshots ?? [];
+    return [...snapshots].sort((a, b) => (a.timestep ?? 0) - (b.timestep ?? 0));
+  }, [activeScenario, mobilityWorld]);
 
   const mobilitySnapshot = useMemo(() => {
-    const scenarioSnapshots = activeScenario?.snapshots;
-    const snapshots = scenarioSnapshots ?? mobilityWorld?.snapshots ?? [];
-    if (!snapshots.length) return null;
-    const sorted = [...snapshots].sort((a, b) => (a.timestep ?? 0) - (b.timestep ?? 0));
-    let active = sorted[sorted.length - 1];
-    for (const snapshot of sorted) {
+    if (!activeSnapshots.length) return null;
+    let active = activeSnapshots[activeSnapshots.length - 1];
+    for (const snapshot of activeSnapshots) {
       if ((snapshot.timestep ?? 0) <= clockMinute) {
         active = snapshot;
       } else {
@@ -1168,17 +1189,16 @@ function App() {
       }
     }
     return active;
-  }, [mobilityWorld, activeScenario, clockMinute]);
+  }, [activeSnapshots, clockMinute]);
   const mobilityStepMinutes = activeScenario?.step_minutes ?? mobilityWorld?.step_minutes ?? 15;
   const simulationEndMinute = useMemo(() => {
-    const snapshots = activeScenario?.snapshots ?? mobilityWorld?.snapshots ?? [];
-    if (!snapshots.length) return SIM_END_MINUTE;
-    const lastTimestep = snapshots.reduce(
+    if (!activeSnapshots.length) return SIM_END_MINUTE;
+    const lastTimestep = activeSnapshots.reduce(
       (latest, snapshot) => Math.max(latest, Number(snapshot.timestep) || 0),
       0
     );
     return clamp(lastTimestep + mobilityStepMinutes - 0.001, SIM_RESET_MINUTE, SIM_END_MINUTE);
-  }, [activeScenario, mobilityWorld, mobilityStepMinutes]);
+  }, [activeSnapshots, mobilityStepMinutes]);
   const atSimulationEnd = clockMinute >= simulationEndMinute - 0.01;
 
   // Simulated clock runs once through the exported timeline. It pauses at the end
@@ -1201,6 +1221,10 @@ function App() {
     }, 50);
     return () => clearInterval(i);
   }, [simSpeed, paused, simulationEndMinute]);
+  const generatedTrafficPressureByCell = useMemo(
+    () => makeGeneratedTrafficPressureByCell(mobilitySnapshot, populationGrid),
+    [mobilitySnapshot, populationGrid]
+  );
 
   const nodeCountsByCell = useMemo(
     () => makeNodeCountsByGridCell(ppoNodes, populationGrid),
@@ -1248,8 +1272,8 @@ function App() {
     const vals = network.features
       .map(
         f =>
-          effectiveCongestionForEdge(f, currentHourFloat) *
-          generatedTrafficMultiplierForEdge(f, mobilitySnapshot, populationGrid)
+          effectiveCongestionForEdge(f, trafficDisplayHour) *
+          generatedTrafficMultiplierForEdge(f, generatedTrafficPressureByCell, populationGrid)
       )
       .filter(v => typeof v === "number" && !Number.isNaN(v))
       .sort((a, b) => a - b);
@@ -1258,7 +1282,7 @@ function App() {
     const mean = vals.reduce((acc, v) => acc + v, 0) / vals.length;
     const hotShare = vals.filter(v => v >= 2.5).length / vals.length;
     return {mean, p50: q(0.5), p90: q(0.9), hotShare};
-  }, [network, currentHourFloat, mobilitySnapshot, populationGrid]);
+  }, [network, trafficDisplayHour, generatedTrafficPressureByCell, populationGrid]);
 
   const edgeLayer = useMemo(() => {
     if (!network) return null;
@@ -1272,21 +1296,21 @@ function App() {
       lineWidthMaxPixels: showGreedySim ? 5 : 8,
       getLineWidth: f => {
         const congestion =
-          effectiveCongestionForEdge(f, currentHourFloat) *
-          generatedTrafficMultiplierForEdge(f, mobilitySnapshot, populationGrid);
+          effectiveCongestionForEdge(f, trafficDisplayHour) *
+          generatedTrafficMultiplierForEdge(f, generatedTrafficPressureByCell, populationGrid);
         const t = clamp((congestion - 1.0) / (4.8 - 1.0), 0, 1);
         return showGreedySim ? 0.65 + t * 2.7 : 0.9 + t * 5.4;
       },
       getLineColor: f => {
         const congestion =
-          effectiveCongestionForEdge(f, currentHourFloat) *
-          generatedTrafficMultiplierForEdge(f, mobilitySnapshot, populationGrid);
+          effectiveCongestionForEdge(f, trafficDisplayHour) *
+          generatedTrafficMultiplierForEdge(f, generatedTrafficPressureByCell, populationGrid);
         const [r, g, b] = trafficColorFromCongestion(congestion);
         return [r, g, b, showGreedySim ? 130 : 245];
       },
       updateTriggers: {
-        getLineWidth: [currentHourFloat, showGreedySim, mobilitySnapshot, populationGrid],
-        getLineColor: [currentHourFloat, showGreedySim, mobilitySnapshot, populationGrid]
+        getLineWidth: [trafficDisplayHour, showGreedySim, generatedTrafficPressureByCell, populationGrid],
+        getLineColor: [trafficDisplayHour, showGreedySim, generatedTrafficPressureByCell, populationGrid]
       },
       pickable: true,
       autoHighlight: true,
@@ -1298,8 +1322,8 @@ function App() {
         const ttime = p.hourly_travel_time_s?.[currentHour];
         const baseCong = p.hourly_congestion_factor?.[currentHour] ?? 1;
         const simCong =
-          effectiveCongestionForEdge(object, currentHourFloat) *
-          generatedTrafficMultiplierForEdge(object, mobilitySnapshot, populationGrid);
+          effectiveCongestionForEdge(object, trafficDisplayHour) *
+          generatedTrafficMultiplierForEdge(object, generatedTrafficPressureByCell, populationGrid);
         const multiplier = simCong / Math.max(0.05, baseCong);
         const simSpeed = typeof speed === "number" ? speed / multiplier : speed;
         const simTime = typeof ttime === "number" ? ttime * multiplier : ttime;
@@ -1313,7 +1337,7 @@ function App() {
         };
       }
     });
-  }, [network, currentHour, currentHourFloat, globalCongestionScale, showGreedySim, mobilitySnapshot, populationGrid]);
+  }, [network, currentHour, trafficDisplayHour, globalCongestionScale, showGreedySim, generatedTrafficPressureByCell, populationGrid]);
 
   const commuteWaveLayer = useMemo(() => {
     if (!network || showGreedySim) return null;
@@ -1326,11 +1350,11 @@ function App() {
       lineWidthMinPixels: 0,
       lineWidthMaxPixels: 14,
       getLineWidth: f => {
-        const intensity = commuteWaveIntensity(f, currentHourFloat);
+        const intensity = commuteWaveIntensity(f, trafficDisplayHour);
         return intensity < 0.08 ? 0 : 2 + intensity * 8;
       },
       getLineColor: f => {
-        const intensity = commuteWaveIntensity(f, currentHourFloat);
+        const intensity = commuteWaveIntensity(f, trafficDisplayHour);
         if (intensity < 0.08) return [0, 0, 0, 0];
         return [
           255,
@@ -1340,12 +1364,12 @@ function App() {
         ];
       },
       updateTriggers: {
-        getLineWidth: [currentHourFloat],
-        getLineColor: [currentHourFloat]
+        getLineWidth: [trafficDisplayHour],
+        getLineColor: [trafficDisplayHour]
       },
       pickable: false
     });
-  }, [network, currentHourFloat, showGreedySim]);
+  }, [network, trafficDisplayHour, showGreedySim]);
 
   const nodeDensityLayer = useMemo(() => {
     if (!showNodeDensity || !ppoNodes.length) return null;
@@ -1406,8 +1430,16 @@ function App() {
         : [],
     [showGreedySim, mobilitySnapshot, populationGrid, clockMinute, mobilityStepMinutes, routeIndex]
   );
+  const gridClockMinute = Math.floor(clockMinute / 5) * 5;
+  const greedyCarsForGrid = useMemo(
+    () =>
+      showGreedySim && mobilitySnapshot && populationGrid
+        ? greedyCarPoints(mobilitySnapshot, populationGrid, gridClockMinute, mobilityStepMinutes, routeIndex)
+        : [],
+    [showGreedySim, mobilitySnapshot, populationGrid, gridClockMinute, mobilityStepMinutes, routeIndex]
+  );
 
-  const carsForPresenceGrid = showGreedySim ? greedyCars : uberCars;
+  const carsForPresenceGrid = showGreedySim ? greedyCarsForGrid : uberCars;
 
   const carPresenceByCell = useMemo(
     () =>
@@ -2363,8 +2395,8 @@ function App() {
             const ttime = p.hourly_travel_time_s?.[currentHour];
             const baseCong = p.hourly_congestion_factor?.[currentHour] ?? 1;
             const simCong =
-              effectiveCongestionForEdge(object, currentHourFloat) *
-              generatedTrafficMultiplierForEdge(object, mobilitySnapshot, populationGrid);
+              effectiveCongestionForEdge(object, trafficDisplayHour) *
+              generatedTrafficMultiplierForEdge(object, generatedTrafficPressureByCell, populationGrid);
             const multiplier = simCong / Math.max(0.05, baseCong);
             const simSpeed = typeof speed === "number" ? speed / multiplier : speed;
             const simTime = typeof ttime === "number" ? ttime * multiplier : ttime;
