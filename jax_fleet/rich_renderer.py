@@ -424,6 +424,7 @@ def _hud_lines(scene: dict[str, Any]) -> list[str]:
         f"to dropoff: {int(cars.get('to_dropoff', 0))}",
         "",
         f"requests shown: {len(scene.get('requests', []))}",
+        f"active target: {int(metrics.get('active_requests', 0))}/{int(metrics.get('target_active_requests', 0))}",
         f"queued: {int(metrics.get('queued_requests', requests.get('queued', 0)))}",
         f"assigned: {int(requests.get('assigned', 0))}",
         f"onboard: {int(requests.get('onboard', 0))}",

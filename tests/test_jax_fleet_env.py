@@ -7,8 +7,10 @@ import jax.numpy as jnp
 import numpy as np
 
 from jax_fleet.env import (
+    REQUEST_ASSIGNED,
     REQUEST_DROPPED,
     REQUEST_COMPLETED,
+    REQUEST_ONBOARD,
     REQUEST_QUEUED,
     make_env_params,
     nearest_eligible_car_by_eta,
@@ -38,6 +40,13 @@ def tiny_graph():
             {"source": 2, "target": 3, "travel_time_s": 3.0},
             {"source": 3, "target": 2, "travel_time_s": 3.0},
         ],
+    )
+
+
+def _active_request_count(state) -> int:
+    status = np.asarray(state.request_status)
+    return int(
+        np.isin(status, [REQUEST_QUEUED, REQUEST_ASSIGNED, REQUEST_ONBOARD]).sum()
     )
 
 
@@ -174,6 +183,74 @@ def test_low_default_demand_smoke_stays_finite() -> None:
         assert np.isfinite(float(ts.discount))
         if bool(ts.done):
             break
+
+
+def test_density_top_up_keeps_half_as_many_people_in_play_as_cars() -> None:
+    graph = tiny_graph().replace(
+        node_population_density=jnp.asarray([50.0, 8000.0, 150.0, 4000.0], dtype=jnp.float32)
+    )
+    params = make_env_params(
+        graph,
+        max_cars=4,
+        max_requests=8,
+        initial_car_nodes=[0, 1, 2, 3],
+        target_active_request_fraction=0.5,
+        episode_seconds=80.0,
+    )
+    state, ts = reset(jax.random.PRNGKey(5), params)
+
+    assert params.target_active_requests == 2
+    assert _active_request_count(state) == 2
+
+    for _ in range(12):
+        action = jnp.where(ts.observation.action_mask[0], 0, jnp.argmax(ts.observation.action_mask))
+        state, ts = step(state, action.astype(jnp.int32), params)
+        if bool(ts.done):
+            break
+        assert _active_request_count(state) == 2
+
+
+def test_density_top_up_samples_origins_from_weighted_density() -> None:
+    graph = tiny_graph().replace(
+        node_population_density=jnp.asarray([0.0, 1.0e9, 0.0, 0.0], dtype=jnp.float32)
+    )
+    params = make_env_params(
+        graph,
+        max_cars=6,
+        max_requests=8,
+        initial_car_nodes=[0, 0, 0, 0, 0, 0],
+        target_active_request_fraction=0.5,
+    )
+
+    state, _ = reset(jax.random.PRNGKey(0), params)
+    active = np.isin(
+        np.asarray(state.request_status),
+        [REQUEST_QUEUED, REQUEST_ASSIGNED, REQUEST_ONBOARD],
+    )
+
+    assert int(active.sum()) == 3
+    assert set(np.asarray(state.request_origin_nodes)[active].tolist()) == {1}
+
+
+def test_density_weights_evolve_by_hour_and_pull_midday_toward_center() -> None:
+    graph = tiny_graph().replace(
+        node_population_density=jnp.asarray([1000.0, 1000.0, 1000.0, 1000.0], dtype=jnp.float32),
+        node_grid_rows=jnp.asarray([0, 25, 25, 49], dtype=jnp.int32),
+        node_grid_cols=jnp.asarray([0, 25, 25, 49], dtype=jnp.int32),
+    )
+
+    params = make_env_params(
+        graph,
+        max_cars=2,
+        max_requests=4,
+        initial_car_nodes=[0, 1],
+        target_active_request_fraction=0.5,
+    )
+
+    weights = np.asarray(params.node_density_by_hour)
+    assert weights.shape == (24, graph.num_nodes)
+    assert weights[13, 1] > weights[13, 0]
+    assert not np.allclose(weights[13], weights[21])
 
 
 def test_scheduled_requests_overflow_active_capacity_and_count_drops() -> None:

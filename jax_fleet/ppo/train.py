@@ -97,10 +97,10 @@ def train_smoke(
 
 def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
     graph = graph or _load_graph_from_config(config)
-    spawn_source = config.spawn_source or ("js-visual" if config.graph_name == "sf" else "uniform")
+    spawn_source = config.spawn_source or ("density" if config.graph_name == "sf" else "uniform")
     initial_nodes = (
         None
-        if spawn_source == "js-visual"
+        if spawn_source in {"js-visual", "density"}
         else _default_initial_car_nodes(graph.num_nodes, config.max_cars, config.seed)
     )
     env_params = make_spawned_env_params(
@@ -232,10 +232,10 @@ def benchmark_env_steps(
     import time
 
     graph = graph or _load_graph_from_config(config)
-    spawn_source = config.spawn_source or ("js-visual" if config.graph_name == "sf" else "uniform")
+    spawn_source = config.spawn_source or ("density" if config.graph_name == "sf" else "uniform")
     initial_nodes = (
         None
-        if spawn_source == "js-visual"
+        if spawn_source in {"js-visual", "density"}
         else _default_initial_car_nodes(graph.num_nodes, config.max_cars, config.seed)
     )
     env_params = make_spawned_env_params(

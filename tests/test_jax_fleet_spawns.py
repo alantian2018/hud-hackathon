@@ -90,7 +90,7 @@ def test_js_visual_request_schedule_uses_mobility_world_minutes_and_grid_snappin
     assert float(schedule.patience_seconds[0]) == float(first_person["patience"] * 60)
 
 
-def test_make_spawned_env_params_defaults_sf_to_js_visual_schedule() -> None:
+def test_make_spawned_env_params_defaults_sf_to_density_top_up() -> None:
     graph = load_public_data_graph(DATA_DIR, include_routing=False)
 
     params = make_spawned_env_params(
@@ -105,4 +105,23 @@ def test_make_spawned_env_params_defaults_sf_to_js_visual_schedule() -> None:
 
     original_ids = [int(np.asarray(graph.original_node_ids)[node]) for node in np.asarray(params.initial_car_nodes)]
     assert original_ids == _expected_js_seeded_original_ids(graph, seed=7, fleet_size=3)
+    assert params.target_active_requests == 1
+    assert params.preplanned_spawn_times.shape[0] == 0
+
+
+def test_make_spawned_env_params_keeps_explicit_js_visual_schedule() -> None:
+    graph = load_public_data_graph(DATA_DIR, include_routing=False)
+
+    params = make_spawned_env_params(
+        graph,
+        data_dir=DATA_DIR,
+        graph_name="sf",
+        spawn_source="js-visual",
+        seed=7,
+        max_cars=3,
+        max_requests=4,
+        episode_seconds=16 * 60.0,
+    )
+
     assert params.preplanned_spawn_times.shape[0] > params.max_requests
+    assert params.target_active_requests == 0

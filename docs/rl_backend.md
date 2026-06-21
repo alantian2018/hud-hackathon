@@ -30,8 +30,16 @@ existing map artifacts. It is separate from the React/Deck.gl frontend.
   automatically. The policy is not queried during `TO_PICKUP` or `TO_DROPOFF`.
 - Travel time is sampled from the current hourly profile when a car enters an
   edge and is not mutated mid-edge.
-- Requests use fixed-size arrays. Preplanned requests are useful for tests;
-  random low-rate demand uses exponential interarrival times.
+- Requests use fixed-size arrays. Preplanned requests are useful for tests.
+  Uniform random demand can still use exponential interarrival times, but SF
+  defaults to density top-up demand.
+- Density top-up demand keeps `target_active_requests` passengers in play. In
+  SF mode that target defaults to half the car count, capped by
+  `max_requests`. Each replacement request samples origin and destination nodes
+  from a time-varying density table derived from node population density and the
+  frontend's hourly population profile. This is the fixed-count form of a
+  spatial Poisson process: counts are clamped to the active-passenger target
+  while locations follow the density heatmap.
 - Queued requests are assigned deterministically to the eligible car with the
   lowest directed ETA.
 - Invalid action slots fall back to the first valid outgoing edge and increment
@@ -105,7 +113,7 @@ python3 -m jax_fleet.cli train \
   --num-updates 1000 \
   --max-cars 16 \
   --max-requests 256 \
-  --spawn-rate-per-minute 2.0 \
+  --spawn-source density \
   --checkpoint-dir runs/jax_fleet/sf/checkpoints \
   --metrics-path runs/jax_fleet/sf/metrics.jsonl
 ```

@@ -20,6 +20,10 @@ React/Deck.gl demo or add WebSockets.
 - The optional greedy simulator export is `public/data/mobility_world.json`.
   It contains fixed minute snapshots with `map_dispatch.cars`, `map_people`,
   assignment route coordinates, and summary stats.
+- The JAX live/training backend now treats those fixed `new_people` snapshots
+  as a legacy `js-visual` source. The default SF passenger source is density
+  top-up: cars still seed from the visual node set, while requests are sampled
+  continuously from time-varying node density.
 
 ## Existing Python Boundary
 
