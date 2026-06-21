@@ -1021,36 +1021,89 @@ function Metric({label, value}) {
   );
 }
 
-function TrafficLegend() {
-  const items = [
+function MapLegend() {
+  const trafficItems = [
     ["Light", [55, 124, 92, 104]],
     ["Moderate", [185, 143, 54, 112]],
     ["Heavy", [192, 103, 48, 124]],
     ["Severe", [196, 58, 56, 138]]
   ];
   return (
-    <div style={{display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end"}}>
-      <span style={{fontSize: 12, opacity: 0.62, fontWeight: 700}}>Traffic</span>
-      {items.map(([label, color]) => (
-        <span
+    <div style={{
+      position: "absolute",
+      zIndex: 15,
+      left: 12,
+      bottom: 12,
+      display: "flex",
+      alignItems: "center",
+      gap: 12,
+      flexWrap: "wrap",
+      maxWidth: "calc(100vw - 24px)",
+      padding: "9px 11px",
+      borderRadius: 8,
+      background: "rgba(4,8,14,0.84)",
+      color: "white",
+      border: "1px solid rgba(138,180,248,0.34)",
+      boxShadow: "0 14px 40px rgba(0,0,0,0.34)",
+      backdropFilter: "blur(10px)",
+      fontFamily: "system-ui, sans-serif",
+      fontSize: 12,
+      pointerEvents: "auto"
+    }}>
+      <LegendBadge label="Idle car" swatch={<DotSwatch fill="#bdbfc6" />} />
+      <LegendBadge label="Ride car" swatch={<DotSwatch fill="linear-gradient(90deg, #34a853 0 50%, #a855f7 50% 100%)" />} />
+      <LegendBadge label="Start" swatch={<DotSwatch fill="#4285f4" />} />
+      <LegendBadge label="End" swatch={<DotSwatch fill="#ea4335" />} />
+      <LegendBadge label="Trip route" swatch={<LineSwatch color="#4285f4" />} />
+      <LegendBadge label="Reposition" swatch={<LineSwatch color="#14b8a6" />} />
+      <LegendBadge label="Surge" swatch={<DotSwatch fill="#ef4444" />} />
+      <span style={{width: 1, height: 20, background: "rgba(148,163,184,0.26)"}} />
+      <span style={{fontSize: 11, opacity: 0.58, fontWeight: 850, textTransform: "uppercase", letterSpacing: 0}}>
+        Traffic
+      </span>
+      {trafficItems.map(([label, color]) => (
+        <LegendBadge
           key={label}
-          style={{
-            display: "inline-flex",
-            alignItems: "center",
-            gap: 5,
-            padding: "5px 7px",
-            borderRadius: 7,
-            background: "rgba(15,23,42,0.72)",
-            border: "1px solid rgba(148,163,184,0.24)",
-            fontSize: 12,
-            color: "rgba(255,255,255,0.82)"
-          }}
-        >
-          <span style={{width: 20, height: 3, borderRadius: 99, background: rgba(color), display: "inline-block"}} />
-          {label}
-        </span>
+          label={label}
+          swatch={<LineSwatch color={rgba(color)} compact />}
+        />
       ))}
     </div>
+  );
+}
+
+function LegendBadge({label, swatch}) {
+  return (
+    <span style={{display: "inline-flex", alignItems: "center", gap: 6, color: "rgba(255,255,255,0.84)", fontWeight: 700, whiteSpace: "nowrap"}}>
+      {swatch}
+      <span>{label}</span>
+    </span>
+  );
+}
+
+function DotSwatch({fill}) {
+  return (
+    <span style={{
+      width: 18,
+      height: 18,
+      borderRadius: 999,
+      background: fill,
+      border: "2px solid rgba(255,255,255,0.88)",
+      display: "inline-flex",
+      boxSizing: "border-box"
+    }} />
+  );
+}
+
+function LineSwatch({color, compact = false}) {
+  return (
+    <span style={{
+      width: compact ? 18 : 24,
+      height: compact ? 3 : 4,
+      borderRadius: 99,
+      background: color,
+      display: "inline-flex"
+    }} />
   );
 }
 
@@ -1295,7 +1348,6 @@ function ControlBar({
             })}
           </div>
         )}
-        <TrafficLegend />
       </div>
     </header>
   );
@@ -1481,6 +1533,7 @@ function ComparisonShell({compare}) {
           event={activeEvent}
         />
       )}
+      <MapLegend />
       <BusinessImpactOverlay
         greedySnapshot={finalGreedySnapshot}
         rlSnapshot={finalRlSnapshot}
