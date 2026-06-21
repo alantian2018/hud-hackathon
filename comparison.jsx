@@ -1903,7 +1903,7 @@ function ComparisonShell({mode}) {
       setClockMinute(current => current >= endMinute - 0.01 ? PRE_FRAME_MINUTE : current);
       setImpactDismissed(false);
       setRunning(true);
-    }, 2400);
+    }, 4000);
     return () => clearTimeout(timer);
   }, [mode, data.status, endMinute]);
 
