@@ -74,7 +74,7 @@ const UBER_CAR_ICON_URL = `data:image/svg+xml;charset=utf-8,${UBER_CAR_ICON_SVG}
 const INITIAL_VIEW_STATE = {
   longitude: -122.4194,
   latitude: 37.7749,
-  zoom: 13.8,
+  zoom: 13.1,
   pitch: 60,
   bearing: -20
 };
