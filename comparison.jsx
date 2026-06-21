@@ -12,7 +12,7 @@ const SPEEDS = [0.5, 1, 4, 12, 30, 60];
 const INITIAL_VIEW_STATE = {
   longitude: -122.4194,
   latitude: 37.7749,
-  zoom: 12.7,
+  zoom: 12.0,
   pitch: 52,
   bearing: -18
 };
@@ -279,40 +279,70 @@ function routeCoordinatesAreUsable(coordinates) {
 }
 
 function pointAlongRoute(coordinates, progress) {
-  if (!Array.isArray(coordinates) || !coordinates.length) return null;
+  return interpolatePathPosition(coordinates, progress);
+}
+
+function interpolatePathPosition(coordinates, progress) {
+  if (!Array.isArray(coordinates) || coordinates.length === 0) return null;
   if (coordinates.length === 1) return coordinates[0];
+  const targetProgress = clamp(progress, 0, 1);
+  if (targetProgress <= 0) return coordinates[0];
+  if (targetProgress >= 1) return coordinates[coordinates.length - 1];
+
   const lengths = [];
-  let total = 0;
+  let totalLength = 0;
   for (let i = 0; i < coordinates.length - 1; i++) {
-    const length = Math.hypot(
-      coordinates[i + 1][0] - coordinates[i][0],
-      coordinates[i + 1][1] - coordinates[i][1]
-    );
+    const length = routeSegmentMeters(coordinates[i], coordinates[i + 1]);
     lengths.push(length);
-    total += length;
+    totalLength += length;
   }
-  if (total <= 0) return coordinates[0];
-  let remaining = clamp(progress, 0, 1) * total;
+  if (totalLength <= 0) return coordinates[0];
+
+  let distance = totalLength * targetProgress;
   for (let i = 0; i < lengths.length; i++) {
-    if (remaining > lengths[i]) {
-      remaining -= lengths[i];
+    const length = lengths[i];
+    if (distance > length) {
+      distance -= length;
       continue;
     }
-    const t = lengths[i] <= 0 ? 0 : remaining / lengths[i];
     const a = coordinates[i];
     const b = coordinates[i + 1];
+    const t = length <= 0 ? 0 : distance / length;
     return [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
   }
+
   return coordinates[coordinates.length - 1];
 }
 
 function remainingRoute(coordinates, progress) {
-  const point = pointAlongRoute(coordinates, progress);
-  if (!point || !coordinates?.length) return [];
-  if (progress >= 1) return [coordinates[coordinates.length - 1]];
-  const target = clamp(progress, 0, 1);
-  const splitIndex = Math.floor(target * Math.max(1, coordinates.length - 1));
-  return [point, ...coordinates.slice(Math.min(coordinates.length - 1, splitIndex + 1))];
+  if (!Array.isArray(coordinates) || coordinates.length < 2) return coordinates ?? [];
+  const targetProgress = clamp(progress, 0, 1);
+  if (targetProgress >= 1) return [coordinates[coordinates.length - 1]];
+
+  const lengths = [];
+  let totalLength = 0;
+  for (let i = 0; i < coordinates.length - 1; i++) {
+    const length = routeSegmentMeters(coordinates[i], coordinates[i + 1]);
+    lengths.push(length);
+    totalLength += length;
+  }
+  if (totalLength <= 0) return coordinates;
+
+  let distance = totalLength * targetProgress;
+  for (let i = 0; i < lengths.length; i++) {
+    const length = lengths[i];
+    if (distance > length) {
+      distance -= length;
+      continue;
+    }
+    const a = coordinates[i];
+    const b = coordinates[i + 1];
+    const t = length <= 0 ? 0 : distance / length;
+    const current = [a[0] + (b[0] - a[0]) * t, a[1] + (b[1] - a[1]) * t];
+    return [current, ...coordinates.slice(i + 1)];
+  }
+
+  return [coordinates[coordinates.length - 1]];
 }
 
 function activeJobs(snapshot) {
