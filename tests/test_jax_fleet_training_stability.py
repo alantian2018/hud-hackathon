@@ -211,6 +211,10 @@ def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -
 
     assert default_train_args.graph == "sf"
     assert default_benchmark_args.graph == "sf"
+    assert default_train_args.max_cars == 40
+    assert default_train_args.max_requests == 32
+    assert default_benchmark_args.max_cars == 40
+    assert default_benchmark_args.max_requests == 32
 
     train_args = parser.parse_args(
         [

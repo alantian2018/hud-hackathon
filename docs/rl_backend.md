@@ -88,9 +88,9 @@ multiple update epochs, clipped policy loss, clipped value loss, entropy bonus,
 gradient clipping, CleanRL-style `charts/*`, `losses/*`, `rollout/*`, and
 `env/*` metrics, JSONL metric logging, optional W&B tracking, and Orbax
 checkpoints. It is intentionally close to CleanRL's JAX PPO loop, adapted to
-the event-driven fleet environment. It defaults to synthetic graphs; full SF
-training loads the public-data graph with routing enabled and uses the cached
-dense routing tables.
+the event-driven fleet environment. It defaults to full SF training with the
+public-data graph, cached dense routing tables, 40 cars, and 32 request slots.
+Synthetic smoke training must opt in with `--graph synthetic`.
 
 ## Commands
 
@@ -99,7 +99,8 @@ Prepare or validate the full SF routing cache:
 W&B is optional. Install it with `pip install wandb` or
 `pip install .[tracking]`, then pass `--track` to training commands.
 The train and benchmark commands default to the full SF graph. Synthetic runs
-must opt in with `--graph synthetic`.
+must opt in with `--graph synthetic`. The default SF demand source maintains
+roughly half as many active passengers as cars, capped by `max_requests`.
 
 ```bash
 python3 -m jax_fleet.cli prepare-routing \
@@ -136,8 +137,8 @@ python3 -m jax_fleet.cli train \
   --num-updates 1000 \
   --update-epochs 4 \
   --num-minibatches 4 \
-  --max-cars 16 \
-  --max-requests 256 \
+  --max-cars 40 \
+  --max-requests 32 \
   --assignment-max-route-edges 15 \
   --spawn-source density \
   --checkpoint-dir runs/jax_fleet/sf/checkpoints \

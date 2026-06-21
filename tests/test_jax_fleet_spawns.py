@@ -126,6 +126,22 @@ def test_make_spawned_env_params_defaults_sf_to_density_top_up() -> None:
     assert params.preplanned_spawn_times.shape[0] == 0
 
 
+def test_density_top_up_keeps_one_request_for_one_car() -> None:
+    graph = load_public_data_graph(DATA_DIR, include_routing=False)
+
+    params = make_spawned_env_params(
+        graph,
+        data_dir=DATA_DIR,
+        graph_name="sf",
+        seed=7,
+        max_cars=1,
+        max_requests=4,
+        episode_seconds=16 * 60.0,
+    )
+
+    assert params.target_active_requests == 1
+
+
 def test_make_spawned_env_params_keeps_explicit_js_visual_schedule() -> None:
     graph = load_public_data_graph(DATA_DIR, include_routing=False)
 

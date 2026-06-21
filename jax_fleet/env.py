@@ -85,6 +85,8 @@ def make_env_params(
         raise ValueError("initial_car_nodes contains ids outside the graph")
     if target_active_requests is None:
         target_active = int(np.floor(max_cars * float(target_active_request_fraction)))
+        if max_cars > 0 and target_active_request_fraction > 0.0:
+            target_active = max(1, target_active)
     else:
         target_active = int(target_active_requests)
     target_active = int(np.clip(target_active, 0, max_requests))

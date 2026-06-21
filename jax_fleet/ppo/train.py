@@ -33,8 +33,8 @@ class TrainingConfig:
     num_envs: int = 4
     num_steps: int = 16
     num_updates: int = 1
-    max_cars: int = 1
-    max_requests: int = 16
+    max_cars: int = 40
+    max_requests: int = 32
     assignment_max_route_edges: int = 15
     episode_seconds: float = 3600.0
     spawn_rate_per_minute: float = 0.0
