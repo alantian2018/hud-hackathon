@@ -5,6 +5,7 @@ export default defineConfig({
     rollupOptions: {
       input: {
         index: "index.html",
+        greedy: "greedy.html",
         rl: "rl.html",
         compare: "compare.html"
       }

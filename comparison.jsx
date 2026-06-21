@@ -731,12 +731,6 @@ function avgWaitMinutes(stats) {
   return Number(stats?.wait_time_min ?? 0) / Math.max(1, completed, servedByPct);
 }
 
-function finalTotalRequests(snapshots, policyId) {
-  if (!snapshots?.length) return 0;
-  const finalMetrics = metricsFor(snapshots[snapshots.length - 1], policyId);
-  return Number(finalMetrics?.total_requests ?? 0);
-}
-
 function metricDelta(rl, greedy, key, lowerIsBetter = false) {
   const a = Number(rl?.[key] ?? 0);
   const b = Number(greedy?.[key] ?? 0);
@@ -993,8 +987,22 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
         boxShadow: "0 18px 52px rgba(0,0,0,0.38)",
         pointerEvents: "none"
       }}>
-        <div style={{fontSize: 12, opacity: 0.68}}>Same map, same request stream</div>
-        <div style={{fontSize: 20, fontWeight: 800, color: policy.accent, marginTop: 2}}>{policy.label}</div>
+        <div style={{display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8}}>
+          <div style={{fontSize: 20, fontWeight: 850, color: policy.accent, lineHeight: 1.05}}>{policy.label}</div>
+          <div style={{
+            padding: "4px 7px",
+            borderRadius: 999,
+            background: "rgba(255,255,255,0.08)",
+            border: "1px solid rgba(255,255,255,0.12)",
+            fontSize: 10,
+            fontWeight: 850,
+            color: "rgba(255,255,255,0.72)",
+            textTransform: "uppercase",
+            letterSpacing: 0
+          }}>
+            {policy.id === "greedy" ? "Baseline" : "RL Policy"}
+          </div>
+        </div>
         <div style={{display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 8, marginTop: 12}}>
           <Metric label="Trips" value={Number(metrics.completed_trips ?? 0).toLocaleString()} />
           <Metric label="Profit" value={formatMoney(metrics.revenue)} />
@@ -1152,97 +1160,164 @@ function BusinessImpactOverlay({greedySnapshot, rlSnapshot, visible}) {
   if (!visible) return null;
   const greedy = metricsFor(greedySnapshot, "greedy");
   const rl = metricsFor(rlSnapshot, "rl");
+  const tripDelta = Number(rl.completed_trips ?? 0) - Number(greedy.completed_trips ?? 0);
+  const revenueDelta = Number(rl.revenue ?? 0) - Number(greedy.revenue ?? 0);
+  const demandDelta = Number(rl.demand_served_pct ?? 0) - Number(greedy.demand_served_pct ?? 0);
+  const waitDelta = avgWaitMinutes(rl) - avgWaitMinutes(greedy);
   const rows = [
     {
-      value: formatSignedInteger(Number(rl.completed_trips ?? 0) - Number(greedy.completed_trips ?? 0)),
-      label: "completed trips"
+      value: formatSignedInteger(tripDelta),
+      label: "completed trips",
+      good: tripDelta >= 0
     },
     {
-      value: formatSignedDollars(Number(rl.revenue ?? 0) - Number(greedy.revenue ?? 0)),
-      label: "revenue"
+      value: formatSignedDollars(revenueDelta),
+      label: "revenue",
+      good: revenueDelta >= 0
     },
     {
-      value: formatSignedDecimal(Number(rl.demand_served_pct ?? 0) - Number(greedy.demand_served_pct ?? 0), 1),
-      label: "percentage points demand served"
+      value: formatSignedDecimal(demandDelta, 1),
+      label: "percentage points demand served",
+      good: demandDelta >= 0
     },
     {
-      value: formatSignedDecimal(avgWaitMinutes(rl) - avgWaitMinutes(greedy), 1),
-      label: "minutes average wait"
+      value: formatSignedDecimal(waitDelta, 1),
+      label: "minutes average wait",
+      good: waitDelta <= 0
     }
   ];
 
   return (
     <div style={{
       position: "absolute",
-      left: "50%",
-      bottom: 24,
-      transform: "translateX(-50%)",
-      width: "min(620px, calc(100vw - 36px))",
-      padding: 16,
-      borderRadius: 8,
-      background: "rgba(3,7,18,0.92)",
-      border: "1px solid rgba(45,212,191,0.34)",
+      inset: 0,
+      display: "grid",
+      placeItems: "center",
+      padding: 24,
+      boxSizing: "border-box",
+      background: "linear-gradient(180deg, rgba(2,6,23,0.36), rgba(2,6,23,0.68))",
       color: "white",
       fontFamily: "system-ui, sans-serif",
-      boxShadow: "0 22px 60px rgba(0,0,0,0.46)",
       pointerEvents: "none",
       zIndex: 20
     }}>
-      <div style={{fontSize: 12, opacity: 0.62, fontWeight: 800, textTransform: "uppercase", letterSpacing: 0}}>
-        Business Impact
-      </div>
-      <div style={{display: "grid", gridTemplateColumns: "repeat(2, minmax(0, 1fr))", gap: 10, marginTop: 10}}>
-        {rows.map(row => (
-          <div
-            key={row.label}
-            style={{
-              minWidth: 0,
-              padding: "10px 11px",
-              borderRadius: 7,
-              background: "rgba(15,23,42,0.76)",
-              border: "1px solid rgba(148,163,184,0.16)"
-            }}
-          >
-            <div style={{fontSize: 22, lineHeight: 1, fontWeight: 900, color: row.value.startsWith("-") ? "#99f6e4" : "#bae6fd"}}>
-              {row.value}
+      <div style={{
+        width: "min(780px, calc(100vw - 48px))",
+        borderRadius: 10,
+        background: "rgba(4,8,14,0.94)",
+        border: "1px solid rgba(125,211,252,0.26)",
+        boxShadow: "0 34px 100px rgba(0,0,0,0.58), inset 0 1px 0 rgba(255,255,255,0.06)",
+        overflow: "hidden",
+        backdropFilter: "blur(14px)"
+      }}>
+        <div style={{
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+          gap: 14,
+          padding: "16px 18px",
+          borderBottom: "1px solid rgba(148,163,184,0.16)",
+          background: "linear-gradient(90deg, rgba(20,184,166,0.16), rgba(14,165,233,0.08), rgba(15,23,42,0))"
+        }}>
+          <div>
+            <div style={{fontSize: 12, opacity: 0.68, fontWeight: 850, textTransform: "uppercase", letterSpacing: 0}}>
+              Simulation complete
             </div>
-            <div style={{fontSize: 12, opacity: 0.74, marginTop: 5, fontWeight: 700}}>
-              {row.label}
+            <div style={{fontSize: 30, fontWeight: 920, lineHeight: 1.05, marginTop: 4}}>
+              Business Impact
             </div>
           </div>
-        ))}
+          <div style={{
+            padding: "8px 10px",
+            borderRadius: 8,
+            background: "rgba(15,23,42,0.82)",
+            border: "1px solid rgba(45,212,191,0.24)",
+            color: "#99f6e4",
+            fontSize: 12,
+            fontWeight: 850,
+            whiteSpace: "nowrap"
+          }}>
+            Final fleet result
+          </div>
+        </div>
+        <div style={{padding: 18}}>
+          <div style={{display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(140px, 1fr))", gap: 10}}>
+            {rows.map(row => (
+              <div
+                key={row.label}
+                style={{
+                  minWidth: 0,
+                  minHeight: 112,
+                  padding: "14px 13px",
+                  borderRadius: 8,
+                  background: row.good ? "rgba(20,184,166,0.13)" : "rgba(248,113,113,0.12)",
+                  border: row.good ? "1px solid rgba(45,212,191,0.26)" : "1px solid rgba(248,113,113,0.24)",
+                  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.05)"
+                }}
+              >
+                <div style={{
+                  fontSize: 26,
+                  lineHeight: 1,
+                  fontWeight: 950,
+                  color: row.good ? "#99f6e4" : "#fecaca",
+                  overflowWrap: "anywhere"
+                }}>
+                  {row.value}
+                </div>
+                <div style={{fontSize: 12, opacity: 0.78, marginTop: 12, fontWeight: 760, lineHeight: 1.25}}>
+                  {row.label}
+                </div>
+              </div>
+            ))}
+          </div>
+          <div style={{
+            marginTop: 13,
+            paddingTop: 13,
+            borderTop: "1px solid rgba(148,163,184,0.14)",
+            color: "rgba(226,232,240,0.68)",
+            fontSize: 12,
+            fontWeight: 700
+          }}>
+            Final frame is frozen so judges can inspect the result without rerunning the simulation.
+          </div>
+        </div>
       </div>
     </div>
   );
 }
 
-function useComparisonData() {
-  const [state, setState] = useState({status: "loading"});
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const [greedyWorld, rlWorld, network, grid, nodeData] = await Promise.all([
-          fetchJson(["/data/mobility_world.json"]),
-          fetchJson(["/data/mobility_orchestrator_world.json"]),
-          fetchJson(["/data/osmnx_edges.geojson", "/dist/data/osmnx_edges.geojson"]),
-          fetchJson(["/data/population_density_grid.json", "/dist/data/population_density_grid.json"]),
-          fetchJson(["/data/ppo_nodes.json", "/dist/data/ppo_nodes.json"])
-        ]);
-        const nodes = Array.isArray(nodeData?.nodes) ? nodeData.nodes : Array.isArray(nodeData) ? nodeData : [];
-        if (!cancelled) setState({status: "ready", greedyWorld, rlWorld, network, grid, nodes});
-      } catch (error) {
-        console.error(error);
-        if (!cancelled) setState({status: "error", error});
-      }
-    }
-    load();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-  return state;
-}
+const primaryButtonStyle = {
+  padding: "9px 12px",
+  border: "1px solid rgba(148,163,184,0.34)",
+  borderRadius: 8,
+  background: "rgba(2,6,23,0.86)",
+  color: "white",
+  cursor: "pointer",
+  fontWeight: 800,
+  fontSize: 13,
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)"
+};
+
+const navButtonStyle = {
+  ...primaryButtonStyle,
+  textDecoration: "none",
+  display: "inline-flex",
+  alignItems: "center"
+};
+
+const eventButtonStyle = {
+  ...primaryButtonStyle,
+  padding: "7px 10px",
+  fontSize: 12,
+  background: "rgba(15,23,42,0.74)"
+};
+
+const activeEventButtonStyle = {
+  ...eventButtonStyle,
+  background: "#7dd3fc",
+  color: "#061016",
+  border: "1px solid rgba(255,255,255,0.72)"
+};
 
 function ControlBar({
   running,
@@ -1257,31 +1332,42 @@ function ControlBar({
   compare,
   events,
   activeEventId,
-  onEventChange,
-  baseDemandRequests
+  onEventChange
 }) {
   return (
     <header style={{
-      minHeight: compare ? 112 : 104,
-      display: "flex",
+      minHeight: 110,
+      display: "grid",
+      gridTemplateColumns: "minmax(320px, 1fr) auto",
       alignItems: "center",
-      justifyContent: "space-between",
-      gap: 14,
-      padding: "10px 14px",
+      gap: 16,
+      padding: "12px 16px",
       boxSizing: "border-box",
-      background: "rgba(4,8,14,0.96)",
+      background: "linear-gradient(180deg, rgba(3,7,18,0.98), rgba(4,8,14,0.94))",
       color: "white",
-      borderBottom: "1px solid rgba(148,163,184,0.22)",
-      fontFamily: "system-ui, sans-serif"
+      borderBottom: "1px solid rgba(148,163,184,0.18)",
+      fontFamily: "system-ui, sans-serif",
+      boxShadow: "0 14px 42px rgba(0,0,0,0.28)",
+      position: "relative",
+      zIndex: 5
     }}>
-      <div style={{display: "flex", flexDirection: "column", gap: 4}}>
-        <div style={{fontSize: 12, opacity: 0.66}}>{compare ? "Synchronized comparison" : "Agentic Fleet page"}</div>
-        <div style={{fontSize: 20, fontWeight: 850}}>{compare ? "Greedy vs Agentic Fleet" : "Agentic Fleet"}</div>
-        {compare && (
-          <div style={{fontSize: 12, opacity: 0.68}}>
-            Base demand: {Number(baseDemandRequests ?? 0).toLocaleString()} requests, same stream for both policies
+      <div style={{display: "flex", flexDirection: "column", gap: 9, minWidth: 0}}>
+        <div style={{display: "flex", alignItems: "center", gap: 12, minWidth: 0}}>
+          <div style={{
+            width: 4,
+            height: 48,
+            borderRadius: 99,
+            background: "linear-gradient(180deg, #7dd3fc, #14b8a6)"
+          }} />
+          <div style={{minWidth: 0}}>
+            <div style={{fontSize: 34, fontWeight: 950, lineHeight: 0.95, letterSpacing: 0}}>
+              FleetForge
+            </div>
+            <div style={{fontSize: 13, opacity: 0.72, marginTop: 7, fontWeight: 720}}>
+              Training AI agents to operate real-world fleets before they touch the real world
+            </div>
           </div>
-        )}
+        </div>
         {compare && (
           <DeltaBar
             greedySnapshot={greedySnapshot}
@@ -1289,21 +1375,29 @@ function ControlBar({
           />
         )}
       </div>
-      <div style={{display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8}}>
+      <div style={{display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 9, minWidth: 0}}>
         <div style={{display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end"}}>
-          <a href="/" style={navButtonStyle}>Greedy Page</a>
+          <a href="/greedy.html" style={navButtonStyle}>Greedy Page</a>
           <a href="/rl.html" style={navButtonStyle}>Agentic Fleet</a>
-          <a href="/compare.html" style={navButtonStyle}>Compare</a>
-          <span style={{padding: "8px 10px", border: "1px solid rgba(148,163,184,0.32)", borderRadius: 7, minWidth: 60, textAlign: "center"}}>
+          <span style={{
+            padding: "8px 11px",
+            border: "1px solid rgba(148,163,184,0.32)",
+            borderRadius: 8,
+            minWidth: 64,
+            textAlign: "center",
+            background: "rgba(15,23,42,0.58)",
+            fontWeight: 800,
+            fontVariantNumeric: "tabular-nums"
+          }}>
             {clockLabel}
           </span>
-          <button type="button" onClick={() => setSpeed(SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length])} style={buttonStyle}>
+          <button type="button" onClick={() => setSpeed(SPEEDS[(SPEEDS.indexOf(speed) + 1) % SPEEDS.length])} style={primaryButtonStyle}>
             x{speed}
           </button>
-          <button type="button" onClick={running ? onPause : onStart} style={{...buttonStyle, background: running ? "#facc15" : "#14b8a6", color: "#061016"}}>
+          <button type="button" onClick={running ? onPause : onStart} style={{...primaryButtonStyle, background: running ? "#facc15" : "#14b8a6", color: "#061016", borderColor: "rgba(255,255,255,0.5)"}}>
             {running ? "Pause" : compare ? "Start Both" : "Start"}
           </button>
-          <button type="button" onClick={onReset} style={buttonStyle}>Reset</button>
+          <button type="button" onClick={onReset} style={primaryButtonStyle}>Reset</button>
         </div>
         {events.length > 0 && (
           <div style={{display: "flex", alignItems: "center", gap: 7, flexWrap: "wrap", justifyContent: "flex-end"}}>
@@ -1336,36 +1430,33 @@ function ControlBar({
   );
 }
 
-const buttonStyle = {
-  padding: "9px 11px",
-  border: "1px solid rgba(148,163,184,0.34)",
-  borderRadius: 7,
-  background: "black",
-  color: "white",
-  cursor: "pointer",
-  fontWeight: 700
-};
-
-const navButtonStyle = {
-  ...buttonStyle,
-  textDecoration: "none",
-  display: "inline-flex",
-  alignItems: "center"
-};
-
-const eventButtonStyle = {
-  ...buttonStyle,
-  padding: "7px 9px",
-  fontSize: 12,
-  background: "rgba(15,23,42,0.82)"
-};
-
-const activeEventButtonStyle = {
-  ...eventButtonStyle,
-  background: "#7dd3fc",
-  color: "#061016",
-  border: "1px solid rgba(255,255,255,0.65)"
-};
+function useComparisonData() {
+  const [state, setState] = useState({status: "loading"});
+  useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const [greedyWorld, rlWorld, network, grid, nodeData] = await Promise.all([
+          fetchJson(["/data/mobility_world.json"]),
+          fetchJson(["/data/mobility_orchestrator_world.json"]),
+          fetchJson(["/data/osmnx_edges.geojson", "/dist/data/osmnx_edges.geojson"]),
+          fetchJson(["/data/population_density_grid.json", "/dist/data/population_density_grid.json"]),
+          fetchJson(["/data/ppo_nodes.json", "/dist/data/ppo_nodes.json"])
+        ]);
+        const nodes = Array.isArray(nodeData?.nodes) ? nodeData.nodes : Array.isArray(nodeData) ? nodeData : [];
+        if (!cancelled) setState({status: "ready", greedyWorld, rlWorld, network, grid, nodes});
+      } catch (error) {
+        console.error(error);
+        if (!cancelled) setState({status: "error", error});
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+  return state;
+}
 
 function ComparisonShell({compare}) {
   const data = useComparisonData();
@@ -1396,11 +1487,6 @@ function ComparisonShell({compare}) {
     const rlEnd = rlSnapshots.at(-1)?.timestep ?? DAY_MINUTES;
     return Math.min(greedyEnd, rlEnd) + Math.min(greedyStep, rlStep) - 0.001;
   }, [greedySnapshots, rlSnapshots, greedyStep, rlStep]);
-  const baseDemandRequests = useMemo(
-    () => Math.max(finalTotalRequests(greedySnapshots, "greedy"), finalTotalRequests(rlSnapshots, "rl")),
-    [greedySnapshots, rlSnapshots]
-  );
-
   useEffect(() => {
     const timer = setInterval(() => {
       if (!running) return;
@@ -1464,7 +1550,6 @@ function ComparisonShell({compare}) {
         events={events}
         activeEventId={activeEventId}
         onEventChange={onEventChange}
-        baseDemandRequests={baseDemandRequests}
       />
       {compare ? (
         <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", height: mapHeight, minHeight: 0}}>
