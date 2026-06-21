@@ -1877,7 +1877,7 @@ function App() {
       accent: "#00d2a5"
     },
     {
-      label: "Revenue",
+      label: "Profit",
       value: formatCurrency(demoStats.revenue),
       detail: `avg fare ${formatCurrency(demoStats.revenue / Math.max(1, demoStats.completedTrips))}`,
       accent: "#7dd3fc"

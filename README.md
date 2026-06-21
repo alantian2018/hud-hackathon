@@ -70,15 +70,15 @@ This writes `public/data/mobility_orchestrator_world.json`, using the existing g
 
 Current base comparison feed:
 
-- greedy: `240` completed trips, `$8,622.26` revenue, `73.19%` served, `5.51m` average wait;
-- RL/value-aware orchestrator: `291` completed trips, `$10,699.16` revenue, `88.55%` served, `4.57m` average wait;
-- delta: `+51` completed trips, `+$2,076.90` revenue, `+15.36pp` served demand, `-0.94m` average wait.
+- greedy: `240` completed trips, `$8,622.26` profit, `73.19%` served, `5.51m` average wait;
+- RL/value-aware orchestrator: `291` completed trips, `$10,699.16` profit, `88.55%` served, `4.57m` average wait;
+- delta: `+51` completed trips, `+$2,076.90` profit, `+15.36pp` served demand, `-0.94m` average wait.
 
 Current event comparison deltas:
 
-- Chase Center exit: `+127` completed trips, `+$6,903.50` revenue, `+12.50pp` served demand, `-3.21m` average wait.
-- Market St surge: `+185` completed trips, `+$8,640.02` revenue, `+22.48pp` served demand, `-7.75m` average wait.
-- FiDi conference: `+171` completed trips, `+$8,165.09` revenue, `+20.09pp` served demand, `-5.72m` average wait.
+- Chase Center exit: `+127` completed trips, `+$6,903.50` profit, `+12.50pp` served demand, `-3.21m` average wait.
+- Market St surge: `+185` completed trips, `+$8,640.02` profit, `+22.48pp` served demand, `-7.75m` average wait.
+- FiDi conference: `+171` completed trips, `+$8,165.09` profit, `+20.09pp` served demand, `-5.72m` average wait.
 
 ## Rebuild OSMnx Road Data
 
@@ -162,7 +162,7 @@ Latest measured run:
 - trained HUD model `mobility-orchestrator-rl-codex-01` checkpoint `fff84abe-f839-47f9-9d2a-8304e35963b8`: `0.321 +/- 0.059` over all six tasks;
 - confirmation job: `https://hud.ai/jobs/3b9089b03b7e4590aa0d80a9dedf77d6`.
 
-The training objective is an absolute normalized metric blend: revenue capture, demand served, wait score, productive utilization, future supply alignment, cancellation penalty, deadhead penalty, and invalid-action penalty. Greedy metrics are intentionally excluded from the reward path.
+The training objective is an absolute normalized metric blend: profit capture, demand served, wait score, productive utilization, future supply alignment, cancellation penalty, deadhead penalty, and invalid-action penalty. Greedy metrics are intentionally excluded from the reward path.
 
 ## Important Files
 

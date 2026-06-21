@@ -996,7 +996,7 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
         <div style={{fontSize: 20, fontWeight: 800, color: policy.accent, marginTop: 2}}>{policy.label}</div>
         <div style={{display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 8, marginTop: 12}}>
           <Metric label="Trips" value={Number(metrics.completed_trips ?? 0).toLocaleString()} />
-          <Metric label="Revenue" value={formatMoney(metrics.revenue)} />
+          <Metric label="Profit" value={formatMoney(metrics.revenue)} />
           <Metric label="Demand Served" value={formatPct(metrics.demand_served_pct)} />
           <Metric label="Avg Wait" value={`${avgWaitMinutes(metrics).toFixed(1)}m`} />
           <Metric label="Util." value={formatPct(metrics.avg_fleet_utilization_pct ?? metrics.fleet_utilization_pct)} />
@@ -1067,7 +1067,7 @@ function DeltaBar({greedySnapshot, rlSnapshot}) {
   return (
     <div style={{display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13}}>
       <Delta label="Trips" value={trips.delta} good={trips.good} />
-      <Delta label="Revenue" value={revenue.delta} good={revenue.good} money />
+      <Delta label="Profit" value={revenue.delta} good={revenue.good} money />
       <Delta label="Demand Served" value={demand.delta} good={demand.good} suffix="pp" />
       <Delta label="Avg Wait" value={avgWait.delta} good={avgWait.good} suffix="m" />
     </div>
