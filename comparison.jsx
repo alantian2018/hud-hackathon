@@ -730,6 +730,12 @@ function avgWaitMinutes(stats) {
   return Number(stats?.wait_time_min ?? 0) / Math.max(1, completed, servedByPct);
 }
 
+function finalTotalRequests(snapshots, policyId) {
+  if (!snapshots?.length) return 0;
+  const finalMetrics = metricsFor(snapshots[snapshots.length - 1], policyId);
+  return Number(finalMetrics?.total_requests ?? 0);
+}
+
 function metricDelta(rl, greedy, key, lowerIsBetter = false) {
   const a = Number(rl?.[key] ?? 0);
   const b = Number(greedy?.[key] ?? 0);
@@ -991,7 +997,7 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
         <div style={{display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 8, marginTop: 12}}>
           <Metric label="Trips" value={Number(metrics.completed_trips ?? 0).toLocaleString()} />
           <Metric label="Revenue" value={formatMoney(metrics.revenue)} />
-          <Metric label="Demand" value={formatPct(metrics.demand_served_pct)} />
+          <Metric label="Demand Served" value={formatPct(metrics.demand_served_pct)} />
           <Metric label="Avg Wait" value={`${avgWaitMinutes(metrics).toFixed(1)}m`} />
           <Metric label="Util." value={formatPct(metrics.avg_fleet_utilization_pct ?? metrics.fleet_utilization_pct)} />
           <Metric label="Active" value={Number(metrics.active_cars ?? 0).toLocaleString()} />
@@ -1062,7 +1068,7 @@ function DeltaBar({greedySnapshot, rlSnapshot}) {
     <div style={{display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13}}>
       <Delta label="Trips" value={trips.delta} good={trips.good} />
       <Delta label="Revenue" value={revenue.delta} good={revenue.good} money />
-      <Delta label="Demand" value={demand.delta} good={demand.good} suffix="pp" />
+      <Delta label="Demand Served" value={demand.delta} good={demand.good} suffix="pp" />
       <Delta label="Avg Wait" value={avgWait.delta} good={avgWait.good} suffix="m" />
     </div>
   );
@@ -1129,7 +1135,8 @@ function ControlBar({
   compare,
   events,
   activeEventId,
-  onEventChange
+  onEventChange,
+  baseDemandRequests
 }) {
   return (
     <header style={{
@@ -1148,6 +1155,11 @@ function ControlBar({
       <div style={{display: "flex", flexDirection: "column", gap: 4}}>
         <div style={{fontSize: 12, opacity: 0.66}}>{compare ? "Synchronized comparison" : "RL policy page"}</div>
         <div style={{fontSize: 20, fontWeight: 850}}>{compare ? "Greedy vs RL Fleet Dispatch" : "RL Fleet Orchestrator"}</div>
+        {compare && (
+          <div style={{fontSize: 12, opacity: 0.68}}>
+            Base demand: {Number(baseDemandRequests ?? 0).toLocaleString()} requests, same stream for both policies
+          </div>
+        )}
         {compare && (
           <DeltaBar
             greedySnapshot={greedySnapshot}
@@ -1263,6 +1275,10 @@ function ComparisonShell({compare}) {
     const rlEnd = rlSnapshots.at(-1)?.timestep ?? DAY_MINUTES;
     return Math.min(greedyEnd, rlEnd) + Math.min(greedyStep, rlStep) - 0.001;
   }, [greedySnapshots, rlSnapshots, greedyStep, rlStep]);
+  const baseDemandRequests = useMemo(
+    () => Math.max(finalTotalRequests(greedySnapshots, "greedy"), finalTotalRequests(rlSnapshots, "rl")),
+    [greedySnapshots, rlSnapshots]
+  );
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -1324,6 +1340,7 @@ function ComparisonShell({compare}) {
         events={events}
         activeEventId={activeEventId}
         onEventChange={onEventChange}
+        baseDemandRequests={baseDemandRequests}
       />
       {compare ? (
         <div style={{display: "grid", gridTemplateColumns: "1fr 1fr", height: mapHeight, minHeight: 0}}>
