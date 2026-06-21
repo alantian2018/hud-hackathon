@@ -1,12 +1,25 @@
-# FleetForge Demo
+# FleetForge
 
 <p align="center">
-  <img src="assets/fleetforge.gif" />
+  <img src="assets/fleetforge-hero.png" alt="FleetForge - training AI agents to operate real-world fleets" />
 </p>
 
-FleetForge is a HUD-trained fleet orchestration environment for comparing a reactive greedy dispatcher against an Agentic RL Fleet on the same San Francisco road network, vehicle supply, demand stream, and event stress tests.
+**Training AI agents to operate real-world fleets.**
 
-The core question is simple: can an agentic fleet controller serve more demand with lower passenger wait time than a nearest-car style greedy policy?
+FleetForge is an RL environment for training, evaluating, and benchmarking AI fleet orchestrators. It compares a reactive greedy dispatcher against an Agentic RL Fleet on the same San Francisco road network, vehicle supply, demand stream, and event stress tests.
+
+The core question is simple: can an agentic fleet controller make better city-scale decisions than a nearest-car style greedy policy, while improving completed trips, profit, demand served, and passenger wait time?
+
+## Why FleetForge
+
+Fleet operations are inherently complex and constantly changing:
+
+- demand fluctuates by the minute;
+- traffic and events create uncertainty;
+- revenue, coverage, utilization, and wait time compete with each other;
+- local decisions can hurt global outcomes through overconcentration, long waits, and missed demand.
+
+The next wave of mobility, delivery, logistics, robotics, and autonomous operations needs a safe way to train and evaluate decision-making before deployment. FleetForge provides that evaluation and training layer: agents observe real-world signals, take high-level actions, receive verified rewards, and get benchmarked across diverse scenarios.
 
 ## What Judges Should Look For
 
@@ -15,6 +28,8 @@ The core question is simple: can an agentic fleet controller serve more demand w
 - **Agentic behavior:** the HUD tool trace shows the observation, hotspot forecasting, matching, repositioning, critique, action, and submission loop behind the Agentic Fleet.
 - **Stress tests:** Base demand, Chase Center Exit, Market St Surge, and FiDi Conference scenarios expose where reactive dispatch breaks down under spatial demand shocks.
 - **HUD training loop:** the fleet controller is framed as a verifiable HUD environment with an absolute reward, MCP tools, taskset seeds, rollout evaluation, and RL training through HUD.
+
+FleetForge turns AI decisions into measurable impact across the physical economy: measurable ROI, safer scenario testing, extensible tools and constraints, and a path beyond cars into delivery, logistics, robots, and more.
 
 ## Live Demo
 
@@ -36,6 +51,10 @@ Optional basemap configuration:
 cp .env.example .env.local
 # set VITE_MAPTILER_KEY if using your own MapTiler project key
 ```
+
+<p align="center">
+  <img src="assets/fleetforge.gif" alt="FleetForge live comparison demo" />
+</p>
 
 ## Demo Flow
 
@@ -71,9 +90,20 @@ Agentic Fleet is the learned orchestration approach. Instead of only matching th
 
 The Agentic Fleet can assign trips, hold vehicles, and reposition idle cars before the obvious greedy action becomes expensive. In the live comparison, trip routes remain blue for both policies, while green routes show Agentic Fleet repositioning.
 
+## Product Loop
+
+FleetForge follows a train, evaluate, deploy workflow:
+
+- **Observe real-world signals:** demand, traffic, vehicles, events, requests, and business metrics.
+- **Take high-level actions:** assign trips, reposition vehicles, hold supply, or reroute.
+- **Receive verified rewards:** score decisions against simulator outcomes and business objectives.
+- **Train, test, and benchmark:** compare agents across baseline and event-driven scenarios.
+
 ## HUD Environment
 
 The HUD environment lives in `hud_mobility/`. It exposes a verifiable fleet-control task where an LLM orchestrator controls the simulator through MCP tools and receives an absolute normalized reward.
+
+The architecture combines an LLM orchestrator, specialist planning tools, and a simulator verifier. World inputs flow into the agent, the agent calls matching, routing, repositioning, pricing, or charging tools, and the simulator executes actions, advances the world, computes metrics, and returns reward feedback.
 
 The agent tool surface includes:
 
