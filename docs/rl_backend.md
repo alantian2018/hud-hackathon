@@ -61,8 +61,11 @@ Each timestep includes:
   congestion, request-origin density likelihood, and a one-hot focus-car block.
 - `local_raster`: centered `50x50x5` intersection-level view around the
   decision car with the same channels projected from lon/lat coordinates.
-- `structured`: compact scalar environment features.
-- `candidate_edges`: per-action edge features.
+- `structured`: compact scalar environment features, including the decision
+  car's graph-bounds-normalized city position.
+- `candidate_edges`: per-action edge features. Coordinate fields are normalized:
+  target `dx/dy` relative to the decision car plus target `x/y` in city bounds,
+  followed by length, duration, congestion, and validity.
 - `action_mask`: valid outgoing-edge slots for the current car.
 
 ## Scene Export And Debugging

@@ -437,6 +437,14 @@ def test_reset_step_jit_and_vmap_shapes() -> None:
     assert state.car_nodes.shape == (2,)
     assert ts.observation.raster.shape == (50, 50, 5)
     assert ts.observation.local_raster.shape == (50, 50, 5)
+    assert ts.observation.structured.shape == (10,)
+    assert ts.observation.candidate_edges.shape == (params.graph.max_degree, 8)
+    np.testing.assert_allclose(np.asarray(ts.observation.structured[2:4]), [1.0, 0.0], rtol=1e-6)
+    np.testing.assert_allclose(
+        np.asarray(ts.observation.candidate_edges[0, :4]),
+        [-0.5, 0.0, 0.5, 0.0],
+        rtol=1e-6,
+    )
     assert float(ts.observation.raster[:, :, 3].max()) > 0.0
     assert float(ts.observation.raster[:, :, 4].sum()) == 1.0
     assert float(ts.observation.local_raster[:, :, 3].max()) > 0.0

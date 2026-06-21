@@ -18,15 +18,21 @@ def build_observation(state: EnvState, params: EnvParams) -> Observation:
     action_mask = graph.outgoing_mask[current_node] & decision
     edge_ids = jnp.where(action_mask, graph.outgoing_edge_ids[current_node], 0)
     edge_targets = jnp.clip(graph.edge_targets[edge_ids], 0, graph.num_nodes - 1)
+    current_lonlat = graph.node_lonlat[current_node]
     target_lonlat = graph.node_lonlat[edge_targets]
+    current_xy = _normalized_lonlat(current_lonlat, params)
+    target_xy = _normalized_lonlat(target_lonlat, params)
+    delta_xy = target_xy - current_xy
     duration = _edge_travel_time_at(edge_ids, state.time_seconds, graph.edge_travel_time_s)
     length = graph.edge_lengths_m[edge_ids]
     hour = (jnp.floor(state.time_seconds / 3600.0).astype(jnp.int32)) % 24
     congestion = graph.edge_congestion[edge_ids, hour]
     candidate_edges = jnp.stack(
         [
-            target_lonlat[:, 0],
-            target_lonlat[:, 1],
+            delta_xy[:, 0],
+            delta_xy[:, 1],
+            target_xy[:, 0],
+            target_xy[:, 1],
             length / 1000.0,
             duration / 60.0,
             congestion,
@@ -41,6 +47,8 @@ def build_observation(state: EnvState, params: EnvParams) -> Observation:
         [
             (state.time_seconds - params.start_time_seconds) / jnp.maximum(params.episode_seconds, 1.0),
             current_car.astype(jnp.float32) / jnp.maximum(params.max_cars - 1, 1),
+            current_xy[0],
+            current_xy[1],
             queued.sum().astype(jnp.float32) / jnp.maximum(params.max_requests, 1),
             (state.car_status == 0).sum().astype(jnp.float32) / jnp.maximum(params.max_cars, 1),
             params.spawn_rate_per_minute,
@@ -169,14 +177,21 @@ def _node_grid_indices(nodes, params: EnvParams):
 
 
 def _lonlat_grid_indices(lonlat, params: EnvParams):
-    min_lon, min_lat, max_lon, max_lat = params.graph.bounds
-    span_lon = jnp.maximum(max_lon - min_lon, 1e-6)
-    span_lat = jnp.maximum(max_lat - min_lat, 1e-6)
-    cols = jnp.floor((lonlat[..., 0] - min_lon) / span_lon * params.raster_size).astype(jnp.int32)
-    rows = jnp.floor((lonlat[..., 1] - min_lat) / span_lat * params.raster_size).astype(jnp.int32)
+    xy = _normalized_lonlat(lonlat, params)
+    cols = jnp.floor(xy[..., 0] * params.raster_size).astype(jnp.int32)
+    rows = jnp.floor(xy[..., 1] * params.raster_size).astype(jnp.int32)
     rows = jnp.clip(rows, 0, params.raster_size - 1)
     cols = jnp.clip(cols, 0, params.raster_size - 1)
     return rows, cols
+
+
+def _normalized_lonlat(lonlat, params: EnvParams):
+    min_lon, min_lat, max_lon, max_lat = params.graph.bounds
+    span_lon = jnp.maximum(max_lon - min_lon, 1e-6)
+    span_lat = jnp.maximum(max_lat - min_lat, 1e-6)
+    x = (lonlat[..., 0] - min_lon) / span_lon
+    y = (lonlat[..., 1] - min_lat) / span_lat
+    return jnp.stack([jnp.clip(x, 0.0, 1.0), jnp.clip(y, 0.0, 1.0)], axis=-1)
 
 
 def _local_lonlat_grid_indices(lonlat, center, half_lon, half_lat, size: int):
