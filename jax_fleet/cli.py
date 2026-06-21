@@ -39,6 +39,16 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--checkpoint-every", default=1, type=int)
     train_parser.add_argument("--metrics-path", default="runs/jax_fleet/metrics.jsonl")
     train_parser.add_argument("--resume", action="store_true")
+    train_parser.add_argument("--track", action="store_true", help="Log metrics to Weights & Biases.")
+    train_parser.add_argument("--wandb-project-name", default="jax_fleet")
+    train_parser.add_argument("--wandb-entity", default=None)
+    train_parser.add_argument("--wandb-run-name", default=None)
+    train_parser.add_argument(
+        "--wandb-mode",
+        choices=["online", "offline", "disabled"],
+        default=None,
+        help="Optional W&B mode passed to wandb.init.",
+    )
 
     benchmark = subparsers.add_parser("benchmark-env", help="Measure compiled env steps/sec with rendering disabled.")
     benchmark.add_argument("--graph", choices=["synthetic", "sf"], default="synthetic")
@@ -104,6 +114,11 @@ def main(argv: list[str] | None = None) -> int:
             checkpoint_every=args.checkpoint_every,
             metrics_path=Path(args.metrics_path) if args.metrics_path else None,
             resume=args.resume,
+            track=args.track,
+            wandb_project_name=args.wandb_project_name,
+            wandb_entity=args.wandb_entity,
+            wandb_run_name=args.wandb_run_name,
+            wandb_mode=args.wandb_mode,
         )
         print(json.dumps(train(config), sort_keys=True))
         return 0

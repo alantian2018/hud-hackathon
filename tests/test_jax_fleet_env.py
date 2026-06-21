@@ -233,7 +233,7 @@ def test_edge_traffic_profile_sets_travel_time_when_edge_is_entered() -> None:
     assert float(state.time_seconds) == 17 * 3600.0 + 15.0
 
 
-def test_dt_seconds_discount_and_sparse_pickup_reward() -> None:
+def test_fixed_discount_and_sparse_pickup_reward() -> None:
     params = make_env_params(
         tiny_graph(),
         max_cars=1,
@@ -241,13 +241,12 @@ def test_dt_seconds_discount_and_sparse_pickup_reward() -> None:
         initial_car_nodes=[0],
         preplanned_requests=[{"spawn_time_s": 2.0, "origin": 1, "destination": 3}],
         gamma=0.99,
-        discount_time_unit_seconds=60.0,
     )
     state, _ = reset(jax.random.PRNGKey(1), params)
 
     _, ts = step(state, jnp.int32(0), params)
 
-    assert math.isclose(float(ts.discount), 0.99 ** (9.0 / 60.0), rel_tol=1e-6)
+    assert math.isclose(float(ts.discount), 0.99, rel_tol=1e-6)
     assert math.isclose(float(ts.reward), -3.0 / 60.0, rel_tol=1e-6)
 
 

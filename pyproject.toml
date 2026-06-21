@@ -23,6 +23,7 @@ dependencies = [
 
 [project.optional-dependencies]
 map = ["osmnx"]
+tracking = ["wandb"]
 
 [project.scripts]
 jax-fleet = "jax_fleet.cli:main"

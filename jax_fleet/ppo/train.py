@@ -4,6 +4,7 @@ from dataclasses import asdict, dataclass, replace
 from functools import partial
 import json
 from pathlib import Path
+import time
 from typing import Any
 
 from flax.training import train_state
@@ -50,6 +51,11 @@ class TrainingConfig:
     checkpoint_every: int = 1
     metrics_path: Path | str | None = Path("runs/jax_fleet/metrics.jsonl")
     resume: bool = False
+    track: bool = False
+    wandb_project_name: str = "jax_fleet"
+    wandb_entity: str | None = None
+    wandb_run_name: str | None = None
+    wandb_mode: str | None = None
 
     def replace(self, **changes):
         return replace(self, **changes)
@@ -164,66 +170,73 @@ def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
         "last_mean_reward": 0.0,
         "latest_checkpoint": str(latest_checkpoint_path(checkpoint_dir)) if checkpoint_dir else None,
     }
-
-    for update in range(start_update + 1, config.num_updates + 1):
-        rollout = _collect_rollout(
-            learner=learner,
-            states=states,
-            timesteps=timesteps,
-            env_params=env_params,
-            rng=rng,
-            num_steps=config.num_steps,
-        )
-        states = rollout["states"]
-        timesteps = rollout["timesteps"]
-        rng = rollout["rng"]
-        bootstrap_value = learner.apply_fn({"params": learner.params}, timesteps.observation)[1]
-        advantages, returns = compute_gae(
-            rewards=rollout["rewards"],
-            values=rollout["values"],
-            bootstrap_value=bootstrap_value,
-            discounts=rollout["discounts"],
-            dones=rollout["dones"],
-            gae_lambda=config.gae_lambda,
-        )
-
-        batch_obs = _flatten_time_env_tree(rollout["observations"])
-        batch = {
-            "actions": rollout["actions"].reshape((-1,)),
-            "old_log_probs": rollout["log_probs"].reshape((-1,)),
-            "advantages": advantages.reshape((-1,)),
-            "returns": returns.reshape((-1,)),
-            "values": rollout["values"].reshape((-1,)),
-        }
-        rng, update_rng = jax.random.split(rng)
-        learner, loss_metrics = _ppo_update(learner, batch_obs, batch, config, update_rng)
-        metrics = {
-            "update": update,
-            "updates": update,
-            "last_loss": float(loss_metrics["loss"]),
-            "last_policy_loss": float(loss_metrics["policy_loss"]),
-            "last_value_loss": float(loss_metrics["value_loss"]),
-            "last_entropy": float(loss_metrics["entropy"]),
-            "last_approx_kl": float(loss_metrics["approx_kl"]),
-            "last_clipfrac": float(loss_metrics["clipfrac"]),
-            "last_mean_reward": float(jnp.asarray(rollout["rewards"]).mean()),
-            "latest_checkpoint": None,
-        }
-        if checkpoint_dir is not None and config.checkpoint_every > 0 and update % config.checkpoint_every == 0:
-            save_path = checkpoint_path(checkpoint_dir, update)
-            checkpointer.save(
-                save_path,
-                {
-                    "params": learner.params,
-                    "opt_state": learner.opt_state,
-                    "train_step": learner.step,
-                    "rng": rng,
-                    "update": update,
-                },
-                force=True,
+    wandb_run = _init_wandb_run(config)
+    started_at = time.perf_counter()
+    try:
+        for update in range(start_update + 1, config.num_updates + 1):
+            rollout = _collect_rollout(
+                learner=learner,
+                states=states,
+                timesteps=timesteps,
+                env_params=env_params,
+                rng=rng,
+                num_steps=config.num_steps,
             )
-            metrics["latest_checkpoint"] = str(save_path)
-        _append_metrics(metrics_path, metrics)
+            states = rollout["states"]
+            timesteps = rollout["timesteps"]
+            rng = rollout["rng"]
+            bootstrap_value = learner.apply_fn({"params": learner.params}, timesteps.observation)[1]
+            advantages, returns = compute_gae(
+                rewards=rollout["rewards"],
+                values=rollout["values"],
+                bootstrap_value=bootstrap_value,
+                discounts=rollout["discounts"],
+                dones=rollout["dones"],
+                gae_lambda=config.gae_lambda,
+            )
+
+            batch_obs = _flatten_time_env_tree(rollout["observations"])
+            batch = {
+                "actions": rollout["actions"].reshape((-1,)),
+                "old_log_probs": rollout["log_probs"].reshape((-1,)),
+                "advantages": advantages.reshape((-1,)),
+                "returns": returns.reshape((-1,)),
+                "values": rollout["values"].reshape((-1,)),
+            }
+            rng, update_rng = jax.random.split(rng)
+            learner, loss_metrics = _ppo_update(learner, batch_obs, batch, config, update_rng)
+            global_step = int(update * config.num_envs * config.num_steps)
+            elapsed = max(1.0e-9, time.perf_counter() - started_at)
+            metrics = _training_metrics(
+                update=update,
+                global_step=global_step,
+                elapsed_seconds=elapsed,
+                rollout=rollout,
+                returns=returns,
+                loss_metrics=loss_metrics,
+                learner=learner,
+                config=config,
+                start_update=start_update,
+                latest_checkpoint=None,
+            )
+            if checkpoint_dir is not None and config.checkpoint_every > 0 and update % config.checkpoint_every == 0:
+                save_path = checkpoint_path(checkpoint_dir, update)
+                checkpointer.save(
+                    save_path,
+                    {
+                        "params": learner.params,
+                        "opt_state": learner.opt_state,
+                        "train_step": learner.step,
+                        "rng": rng,
+                        "update": update,
+                    },
+                    force=True,
+                )
+                metrics["latest_checkpoint"] = str(save_path)
+            _append_metrics(metrics_path, metrics)
+            _log_wandb_metrics(wandb_run, metrics, step=global_step)
+    finally:
+        _finish_wandb_run(wandb_run)
 
     if checkpoint_dir is not None and metrics.get("latest_checkpoint") is None:
         latest = latest_checkpoint_path(checkpoint_dir)
@@ -292,6 +305,113 @@ def benchmark_env_steps(
         "elapsed_seconds": elapsed,
         "steps_per_second": total_steps / elapsed,
     }
+
+
+def _training_metrics(
+    *,
+    update: int,
+    global_step: int,
+    elapsed_seconds: float,
+    rollout: dict[str, Any],
+    returns,
+    loss_metrics,
+    learner: TrainState,
+    config: TrainingConfig,
+    start_update: int,
+    latest_checkpoint: str | None,
+) -> dict[str, Any]:
+    rewards = jnp.asarray(rollout["rewards"], dtype=jnp.float32)
+    returns = jnp.asarray(returns, dtype=jnp.float32)
+    values = jnp.asarray(rollout["values"], dtype=jnp.float32)
+    discounts = jnp.asarray(rollout["discounts"], dtype=jnp.float32)
+    dones = jnp.asarray(rollout["dones"], dtype=jnp.float32)
+    dt_seconds = jnp.asarray(rollout["dt_seconds"], dtype=jnp.float32)
+    env_metrics = rollout["env_metrics"]
+    last_env_metrics = jax.tree_util.tree_map(lambda leaf: leaf[-1], env_metrics)
+    completed_steps = max(1, (int(update) - int(start_update)) * int(config.num_envs) * int(config.num_steps))
+    sps = int(completed_steps / max(elapsed_seconds, 1.0e-9))
+    explained_variance = _explained_variance(returns.reshape((-1,)), values.reshape((-1,)))
+
+    metrics = {
+        "update": int(update),
+        "updates": int(update),
+        "global_step": int(global_step),
+        "latest_checkpoint": latest_checkpoint,
+        "last_loss": float(loss_metrics["loss"]),
+        "last_policy_loss": float(loss_metrics["policy_loss"]),
+        "last_value_loss": float(loss_metrics["value_loss"]),
+        "last_entropy": float(loss_metrics["entropy"]),
+        "last_approx_kl": float(loss_metrics["approx_kl"]),
+        "last_clipfrac": float(loss_metrics["clipfrac"]),
+        "last_mean_reward": float(rewards.mean()),
+        "charts/global_step": int(global_step),
+        "charts/update": int(update),
+        "charts/learning_rate": float(config.learning_rate),
+        "charts/SPS": sps,
+        "charts/train_step": int(jnp.asarray(learner.step)),
+        "losses/loss": float(loss_metrics["loss"]),
+        "losses/policy_loss": float(loss_metrics["policy_loss"]),
+        "losses/value_loss": float(loss_metrics["value_loss"]),
+        "losses/entropy": float(loss_metrics["entropy"]),
+        "losses/old_approx_kl": float(loss_metrics["old_approx_kl"]),
+        "losses/approx_kl": float(loss_metrics["approx_kl"]),
+        "losses/clipfrac": float(loss_metrics["clipfrac"]),
+        "losses/explained_variance": float(explained_variance),
+        "rollout/mean_reward": float(rewards.mean()),
+        "rollout/mean_return": float(returns.mean()),
+        "rollout/mean_discount": float(discounts.mean()),
+        "rollout/mean_dt_seconds": float(dt_seconds.mean()),
+        "rollout/done_fraction": float(dones.mean()),
+        "env/completed_requests": float(jnp.asarray(last_env_metrics.completed_requests).mean()),
+        "env/dropped_requests": float(jnp.asarray(last_env_metrics.dropped_requests).mean()),
+        "env/queued_requests": float(jnp.asarray(last_env_metrics.queued_requests).mean()),
+        "env/invalid_actions": float(jnp.asarray(last_env_metrics.invalid_actions).mean()),
+        "env/pickup_wait_seconds": float(jnp.asarray(last_env_metrics.pickup_wait_seconds).mean()),
+        "env/aggregate_reward": float(jnp.asarray(last_env_metrics.aggregate_reward).mean()),
+    }
+    return metrics
+
+
+def _explained_variance(y_true, y_pred):
+    y_true = jnp.asarray(y_true, dtype=jnp.float32)
+    y_pred = jnp.asarray(y_pred, dtype=jnp.float32)
+    var_y = jnp.var(y_true)
+    return jnp.where(var_y > 1.0e-8, 1.0 - jnp.var(y_true - y_pred) / var_y, jnp.nan)
+
+
+def _init_wandb_run(config: TrainingConfig):
+    if not config.track:
+        return None
+    try:
+        import wandb
+    except ImportError as exc:
+        raise RuntimeError(
+            "W&B tracking requested with --track, but wandb is not installed. "
+            "Install it with `pip install wandb` or `pip install .[tracking]`."
+        ) from exc
+
+    kwargs: dict[str, Any] = {
+        "project": config.wandb_project_name,
+        "config": config.to_jsonable(),
+    }
+    if config.wandb_entity:
+        kwargs["entity"] = config.wandb_entity
+    if config.wandb_run_name:
+        kwargs["name"] = config.wandb_run_name
+    if config.wandb_mode:
+        kwargs["mode"] = config.wandb_mode
+    return wandb.init(**kwargs)
+
+
+def _log_wandb_metrics(wandb_run, metrics: dict[str, Any], *, step: int) -> None:
+    if wandb_run is None:
+        return
+    wandb_run.log(metrics, step=step)
+
+
+def _finish_wandb_run(wandb_run) -> None:
+    if wandb_run is not None:
+        wandb_run.finish()
 
 
 def compute_gae(
@@ -425,6 +545,8 @@ def _collect_rollout_scan(
             "values": value,
             "discounts": next_timesteps.discount,
             "dones": next_timesteps.done,
+            "dt_seconds": next_timesteps.dt_seconds,
+            "env_metrics": next_timesteps.metrics,
         }
         return (loop_states, loop_timesteps, loop_rng), transition
 
@@ -442,6 +564,8 @@ def _collect_rollout_scan(
         "values": rollout["values"],
         "discounts": rollout["discounts"],
         "dones": rollout["dones"],
+        "dt_seconds": rollout["dt_seconds"],
+        "env_metrics": rollout["env_metrics"],
         "states": states,
         "timesteps": timesteps,
         "rng": rng,

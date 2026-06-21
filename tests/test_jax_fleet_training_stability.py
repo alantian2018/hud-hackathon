@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
+from types import SimpleNamespace
 
 import numpy as np
 
@@ -68,11 +70,11 @@ def test_chunked_routing_cache_writes_manifest_and_reuses_hit(tmp_path: Path) ->
     assert reused.fingerprint == info.fingerprint
 
 
-def test_variable_time_gae_uses_transition_discounts() -> None:
+def test_gae_uses_fixed_transition_discount_inputs() -> None:
     rewards = np.asarray([[1.0], [2.0]], dtype=np.float32)
     values = np.asarray([[0.5], [0.25]], dtype=np.float32)
     bootstrap = np.asarray([0.75], dtype=np.float32)
-    discounts = np.asarray([[0.9], [0.5]], dtype=np.float32)
+    discounts = np.asarray([[0.9], [0.9]], dtype=np.float32)
     dones = np.asarray([[False], [False]])
 
     advantages, returns = compute_gae(
@@ -84,7 +86,7 @@ def test_variable_time_gae_uses_transition_discounts() -> None:
         gae_lambda=0.8,
     )
 
-    expected_last = 2.0 + 0.5 * 0.75 - 0.25
+    expected_last = 2.0 + 0.9 * 0.75 - 0.25
     expected_first = 1.0 + 0.9 * 0.25 - 0.5 + 0.9 * 0.8 * expected_last
     np.testing.assert_allclose(np.asarray(advantages).ravel(), [expected_first, expected_last], rtol=1e-6)
     np.testing.assert_allclose(np.asarray(returns), np.asarray(advantages) + values, rtol=1e-6)
@@ -116,14 +118,66 @@ def test_train_writes_metrics_checkpoint_and_resumes(tmp_path: Path) -> None:
     assert Path(first["latest_checkpoint"]).exists()
     lines = metrics_path.read_text(encoding="utf-8").strip().splitlines()
     assert len(lines) == 1
-    assert json.loads(lines[0])["update"] == 1
-    assert json.loads(lines[0])["latest_checkpoint"] == first["latest_checkpoint"]
+    first_metrics = json.loads(lines[0])
+    assert first_metrics["update"] == 1
+    assert first_metrics["latest_checkpoint"] == first["latest_checkpoint"]
+    assert np.isfinite(first_metrics["losses/explained_variance"]) or np.isnan(
+        first_metrics["losses/explained_variance"]
+    )
+    assert first_metrics["charts/global_step"] == config.num_envs * config.num_steps
+    assert np.isclose(first_metrics["rollout/mean_discount"], 0.99)
 
     resumed = train(config.replace(num_updates=2, resume=True), graph=graph)
 
     assert resumed["updates"] == 2
     lines = metrics_path.read_text(encoding="utf-8").strip().splitlines()
     assert [json.loads(line)["update"] for line in lines] == [1, 2]
+
+
+def test_train_logs_to_wandb_when_tracking_enabled(tmp_path: Path, monkeypatch) -> None:
+    graph = stable_graph()
+    logged: list[tuple[dict, int | None]] = []
+    finished = {"value": False}
+    init_kwargs = {}
+
+    class FakeRun:
+        def log(self, metrics, step=None):
+            logged.append((dict(metrics), step))
+
+        def finish(self):
+            finished["value"] = True
+
+    def fake_init(**kwargs):
+        init_kwargs.update(kwargs)
+        return FakeRun()
+
+    monkeypatch.setitem(sys.modules, "wandb", SimpleNamespace(init=fake_init))
+    config = TrainingConfig(
+        seed=5,
+        num_envs=1,
+        num_steps=2,
+        num_updates=1,
+        max_cars=1,
+        max_requests=4,
+        checkpoint_dir=None,
+        metrics_path=tmp_path / "metrics.jsonl",
+        track=True,
+        wandb_project_name="unit-project",
+        wandb_run_name="unit-run",
+        wandb_mode="disabled",
+    )
+
+    train(config, graph=graph)
+
+    assert init_kwargs["project"] == "unit-project"
+    assert init_kwargs["name"] == "unit-run"
+    assert init_kwargs["mode"] == "disabled"
+    assert init_kwargs["config"]["track"] is True
+    assert len(logged) == 1
+    assert logged[0][1] == config.num_envs * config.num_steps
+    assert "charts/SPS" in logged[0][0]
+    assert "losses/approx_kl" in logged[0][0]
+    assert finished["value"] is True
 
 
 def test_train_resolves_relative_artifact_paths(tmp_path: Path, monkeypatch) -> None:
@@ -170,6 +224,8 @@ def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -
     assert train_args.assignment_max_route_edges == 15
     assert train_args.update_epochs == 4
     assert train_args.num_minibatches == 4
+    assert train_args.track is False
+    assert train_args.wandb_project_name == "jax_fleet"
 
     routing_args = parser.parse_args(
         [

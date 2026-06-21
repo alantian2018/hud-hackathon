@@ -49,8 +49,9 @@ existing map artifacts. It is separate from the React/Deck.gl frontend.
 - Default reward is sparse pickup wait penalty:
   `-wait_time_scale * (pickup_time - spawn_time)`, where
   `wait_time_scale = 1/60`.
-- Per-transition discount is
-  `gamma ** (dt_seconds / discount_time_unit_seconds)`.
+- Per-transition discount is fixed per policy step: nonterminal transitions use
+  `gamma`, and terminal transitions use `0.0`. `dt_seconds` is still reported
+  for metrics and visualization, but it no longer changes PPO discounting.
 
 ## Observations
 
@@ -77,17 +78,21 @@ JIT and does not affect training code.
 The model combines global and local CNN raster encoders, a structured-feature
 MLP, and a candidate-edge encoder, then masks logits over `graph.max_degree`.
 
-The trainer uses vectorized envs, variable-time GAE with per-transition
-discounts, shuffled minibatches over multiple update epochs, clipped policy
-loss, clipped value loss, entropy bonus, gradient clipping, JSONL metric
-logging, and Orbax checkpoints. It is intentionally close to CleanRL's JAX PPO
-loop, adapted to the event-driven fleet environment. It defaults to synthetic
-graphs; full SF training loads the public-data graph with routing enabled and
-uses the cached dense routing tables.
+The trainer uses vectorized envs, fixed-discount GAE, shuffled minibatches over
+multiple update epochs, clipped policy loss, clipped value loss, entropy bonus,
+gradient clipping, CleanRL-style `charts/*`, `losses/*`, `rollout/*`, and
+`env/*` metrics, JSONL metric logging, optional W&B tracking, and Orbax
+checkpoints. It is intentionally close to CleanRL's JAX PPO loop, adapted to
+the event-driven fleet environment. It defaults to synthetic graphs; full SF
+training loads the public-data graph with routing enabled and uses the cached
+dense routing tables.
 
 ## Commands
 
 Prepare or validate the full SF routing cache:
+
+W&B is optional. Install it with `pip install wandb` or
+`pip install .[tracking]`, then pass `--track` to training commands.
 
 ```bash
 python3 -m jax_fleet.cli prepare-routing \
@@ -106,6 +111,8 @@ python3 -m jax_fleet.cli train \
   --num-updates 2 \
   --update-epochs 4 \
   --num-minibatches 4 \
+  --track \
+  --wandb-project-name jax_fleet \
   --checkpoint-dir runs/jax_fleet/synthetic/checkpoints \
   --metrics-path runs/jax_fleet/synthetic/metrics.jsonl
 ```

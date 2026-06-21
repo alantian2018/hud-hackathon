@@ -71,7 +71,6 @@ def make_env_params(
     density_destination_time_shift_seconds: float = 2.0 * 3600.0,
     wait_time_scale: float = 1.0 / 60.0,
     gamma: float = 0.99,
-    discount_time_unit_seconds: float = 60.0,
     raster_size: int = 50,
     max_event_steps: int = 512,
     assignment_max_route_edges: int = 15,
@@ -127,7 +126,6 @@ def make_env_params(
         ),
         wait_time_scale=jnp.asarray(wait_time_scale, dtype=jnp.float32),
         gamma=jnp.asarray(gamma, dtype=jnp.float32),
-        discount_time_unit_seconds=jnp.asarray(discount_time_unit_seconds, dtype=jnp.float32),
         preplanned_spawn_times=jnp.asarray(spawn_times, dtype=jnp.float32),
         preplanned_origin_nodes=jnp.asarray(origin_nodes, dtype=jnp.int32),
         preplanned_dest_nodes=jnp.asarray(dest_nodes, dtype=jnp.int32),
@@ -851,7 +849,7 @@ def _refresh_decision(state: EnvState, params: EnvParams) -> EnvState:
 
 
 def _make_timestep(state: EnvState, params: EnvParams, reward, dt_seconds) -> Timestep:
-    discount = params.gamma ** (dt_seconds / jnp.maximum(params.discount_time_unit_seconds, 1e-6))
+    discount = jnp.where(state.done, 0.0, params.gamma)
     return Timestep(
         observation=build_observation(state, params),
         reward=jnp.asarray(reward, dtype=jnp.float32),
