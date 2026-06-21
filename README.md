@@ -35,11 +35,12 @@ The MapTiler key currently lives at the top of `main.jsx` as `MAPTILER_KEY`. Rep
 - `People Grid`: shows pickup cells in blue and destination cells in red.
 - `Greedy`: enables the stateful greedy dispatch simulation.
 - `Speed`: cycles simulated playback speed through `0.1x`, `0.5x`, and faster demo speeds.
+- `Events`: toggles one of three preplanned demand surges: Chase Center exit, Market St surge, or FiDi conference surge. Each event generates more people near that location, which then changes traffic pressure, greedy routes, and stats.
 - Time presets jump the simulation to morning, midday, evening rush, or night.
 
 ## Regenerate Simulation Data
 
-The greedy dispatch snapshots are exported to `public/data/mobility_world.json`. The export uses 5-minute ticks by default so requests and assignments flow continuously during the demo.
+The greedy dispatch snapshots are exported to `public/data/mobility_world.json`. The export uses 5-minute ticks by default so requests and assignments flow continuously during the demo, plus three lighter event timelines for the scenario toggles.
 
 ```bash
 python3 export_mobility_world.py

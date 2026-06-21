@@ -9,10 +9,48 @@ import math
 from pathlib import Path
 import random
 
-from mobility_sim import DemandGenerator, PeopleGenerator, TrafficGenerator
+from mobility_sim import DemandGenerator, PeopleGenerator, PersonRequest, TrafficGenerator
 
 
 MAX_ROUTE_SEGMENT_METERS = 350.0
+EVENT_PRESETS = [
+    {
+        "id": "chase_center_exit",
+        "label": "Chase Center exit",
+        "short_label": "Chase Exit",
+        "description": "Post-event passenger surge concentrated around Chase Center.",
+        "center": [-122.3877, 37.7680],
+        "radius_m": 1_450,
+        "demand_boost": 1.0,
+        "arrival_boost": 1.05,
+        "origin_share": 0.82,
+        "fare_boost": 0.18,
+    },
+    {
+        "id": "market_st_surge",
+        "label": "Market St demand surge",
+        "short_label": "Market Surge",
+        "description": "Dense downtown request spike along Market Street.",
+        "center": [-122.4082, 37.7853],
+        "radius_m": 1_250,
+        "demand_boost": 0.72,
+        "arrival_boost": 0.62,
+        "origin_share": 0.68,
+        "fare_boost": 0.08,
+    },
+    {
+        "id": "fidi_conference",
+        "label": "FiDi conference surge",
+        "short_label": "FiDi Surge",
+        "description": "Conference dismissal creates concentrated passenger demand.",
+        "center": [-122.3990, 37.7940],
+        "radius_m": 1_100,
+        "demand_boost": 0.85,
+        "arrival_boost": 0.75,
+        "origin_share": 0.58,
+        "fare_boost": 0.14,
+    },
+]
 
 
 def load_grid(path: Path) -> dict | tuple[int, int]:
@@ -23,6 +61,41 @@ def load_grid(path: Path) -> dict | tuple[int, int]:
 
 def load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
+
+
+def clamp(value: float, low: float = 0.0, high: float = 1.0) -> float:
+    return max(low, min(high, value))
+
+
+def event_influence_at(position: list[float], event: dict | None) -> float:
+    if not event:
+        return 0.0
+    radius = max(1.0, float(event.get("radius_m", 1_000)))
+    dist = distance_m(position, event["center"])
+    sigma = radius * 0.62
+    return math.exp(-(dist * dist) / max(1e-9, 2 * sigma * sigma))
+
+
+def route_metrics(coordinates: list[list[float]]) -> dict[str, float | list[float]]:
+    lengths = []
+    total = 0.0
+    max_segment = 0.0
+    for idx in range(len(coordinates) - 1):
+        length = distance_m(coordinates[idx], coordinates[idx + 1])
+        lengths.append(length)
+        total += length
+        max_segment = max(max_segment, length)
+    return {
+        "_segment_lengths": lengths,
+        "_geometry_length_m": total,
+        "_max_segment_m": max_segment,
+    }
+
+
+def with_route_metrics(route: dict) -> dict:
+    if "_segment_lengths" not in route:
+        route.update(route_metrics(route.get("coordinates") or []))
+    return route
 
 
 class MapGraph:
@@ -90,7 +163,7 @@ class MapGraph:
                 return candidates
         return []
 
-    def route(self, start_node: int, goal_node: int, hour: int) -> dict:
+    def route(self, start_node: int, goal_node: int, hour: int, event: dict | None = None) -> dict:
         start_node = int(start_node)
         goal_node = int(goal_node)
         cache_key = (start_node, goal_node, int(hour) % 24)
@@ -99,7 +172,9 @@ class MapGraph:
 
         if start_node == goal_node:
             point = self.node_position(start_node)
-            route = {"node_path": [start_node], "coordinates": [point], "cost": 0.0, "fallback": False}
+            route = with_route_metrics(
+                {"node_path": [start_node], "coordinates": [point], "cost": 0.0, "fallback": False}
+            )
             self._route_cache[cache_key] = route
             return route
 
@@ -143,12 +218,14 @@ class MapGraph:
                 coordinates.extend(coords)
             else:
                 coordinates.extend(coords[1:])
-        route = {
-            "node_path": node_path,
-            "coordinates": coordinates,
-            "cost": round(best[goal_node], 6),
-            "fallback": False,
-        }
+        route = with_route_metrics(
+            {
+                "node_path": node_path,
+                "coordinates": coordinates,
+                "cost": round(best[goal_node], 6),
+                "fallback": False,
+            }
+        )
         self._route_cache[cache_key] = route
         return route
 
@@ -160,12 +237,14 @@ class MapGraph:
         dy = (goal[1] - start[1]) * 111_320
         distance_m = math.hypot(dx, dy)
         # Keep browser JSON valid even when OSMnx graph components are disconnected.
-        return {
-            "node_path": [start_node, goal_node],
-            "coordinates": [start, goal],
-            "cost": round(distance_m / 7.0 + 45.0, 6),
-            "fallback": True,
-        }
+        return with_route_metrics(
+            {
+                "node_path": [start_node, goal_node],
+                "coordinates": [start, goal],
+                "cost": round(distance_m / 7.0 + 45.0, 6),
+                "fallback": True,
+            }
+        )
 
 
 def seed_car_nodes(graph: MapGraph, seed: int, fleet_size: int) -> list[int]:
@@ -199,19 +278,147 @@ def distance_m(a: list[float], b: list[float]) -> float:
     return math.hypot(dx, dy)
 
 
-def interpolate_position(coordinates: list[list[float]], progress: float) -> list[float]:
+def cell_center_position(grid: dict, row: int, col: int) -> list[float]:
+    bounds = grid.get("bounds") or {}
+    rows = int(grid.get("rows", 1))
+    cols = int(grid.get("cols", 1))
+    min_lon = float(bounds.get("min_lon", -122.52))
+    max_lon = float(bounds.get("max_lon", -122.35))
+    min_lat = float(bounds.get("min_lat", 37.70))
+    max_lat = float(bounds.get("max_lat", 37.83))
+    d_lon = (max_lon - min_lon) / max(1, cols)
+    d_lat = (max_lat - min_lat) / max(1, rows)
+    return [min_lon + (col + 0.5) * d_lon, min_lat + (row + 0.5) * d_lat]
+
+
+def event_cell_influence(grid: dict, row: int, col: int, event: dict | None) -> float:
+    return event_influence_at(cell_center_position(grid, row, col), event)
+
+
+def apply_event_pressure(heatmap: list[list[float]], grid: dict, event: dict | None, key: str) -> list[list[float]]:
+    if not event:
+        return heatmap
+    rows = int(grid.get("rows", len(heatmap)))
+    cols = int(grid.get("cols", len(heatmap[0]) if heatmap else 0))
+    boost = float(event.get(key, 0.0))
+    if boost <= 0:
+        return heatmap
+    adjusted = []
+    for row in range(rows):
+        adjusted_row = []
+        for col in range(cols):
+            influence = event_cell_influence(grid, row, col, event)
+            adjusted_row.append(round(clamp(float(heatmap[row][col]) + boost * influence), 6))
+        adjusted.append(adjusted_row)
+    return adjusted
+
+
+def top_heatmap_cells(heatmap: list[list[float]], k: int) -> list[dict[str, float | int]]:
+    cells = [
+        {"row": row, "col": col, "value": heatmap[row][col]}
+        for row in range(len(heatmap))
+        for col in range(len(heatmap[row]))
+    ]
+    cells.sort(key=lambda item: float(item["value"]), reverse=True)
+    return cells[: max(0, k)]
+
+
+def weighted_event_cell(
+    grid: dict,
+    event: dict,
+    rng: random.Random,
+    demand_heatmap: list[list[float]],
+    near_event: bool,
+    excluded: tuple[int, int] | None = None,
+    min_distance: int = 0,
+) -> tuple[int, int]:
+    rows = int(grid.get("rows", 0))
+    cols = int(grid.get("cols", 0))
+    weighted_cells = []
+    total = 0.0
+    for row in range(rows):
+        for col in range(cols):
+            cell = (row, col)
+            if excluded and math.hypot(row - excluded[0], col - excluded[1]) < min_distance:
+                continue
+            influence = event_cell_influence(grid, row, col, event)
+            if near_event and influence < 0.22:
+                continue
+            base_demand = float(demand_heatmap[row][col]) if demand_heatmap else 0.2
+            if near_event:
+                weight = 0.04 + influence * influence * (0.85 + base_demand)
+            else:
+                weight = 0.01 + (1.0 - influence) ** 1.4 * (0.25 + base_demand)
+            total += weight
+            weighted_cells.append((total, cell))
+    if not weighted_cells:
+        return excluded or (rng.randrange(max(1, rows)), rng.randrange(max(1, cols)))
+    target = rng.random() * total
+    for cumulative, cell in weighted_cells:
+        if cumulative >= target:
+            return cell
+    return weighted_cells[-1][1]
+
+
+def retarget_people_for_event(
+    people: list[PersonRequest],
+    grid: dict,
+    demand_heatmap: list[list[float]],
+    event: dict | None,
+    timestep: int,
+    seed: int,
+) -> list[PersonRequest]:
+    if not event or not people:
+        return people
+    rng = random.Random(seed * 1_000_003 + timestep * 65_537 + 7_919)
+    share = clamp(float(event.get("origin_share", 0.0)))
+    adjusted = []
+    for person in people:
+        if rng.random() >= share:
+            adjusted.append(person)
+            continue
+        origin = weighted_event_cell(grid, event, rng, demand_heatmap, near_event=True)
+        destination = weighted_event_cell(
+            grid,
+            event,
+            rng,
+            demand_heatmap,
+            near_event=False,
+            excluded=origin,
+            min_distance=20,
+        )
+        adjusted.append(
+            PersonRequest(
+                id=person.id,
+                origin=origin,
+                destination=destination,
+                created_at=person.created_at,
+                patience=max(5, int(person.patience * (1.0 - 0.12 * share))),
+                value=round(float(person.value) * (1.0 + float(event.get("fare_boost", 0.0))), 2),
+                party_size=person.party_size,
+            )
+        )
+    return adjusted
+
+
+def interpolate_position(
+    coordinates: list[list[float]],
+    progress: float,
+    segment_lengths: list[float] | None = None,
+    total_length: float | None = None,
+) -> list[float]:
     if not coordinates:
         return [0.0, 0.0]
     if len(coordinates) == 1:
         return coordinates[0]
 
     target = max(0.0, min(1.0, progress))
-    segments = []
-    total = 0.0
-    for idx in range(len(coordinates) - 1):
-        length = distance_m(coordinates[idx], coordinates[idx + 1])
-        segments.append(length)
-        total += length
+    segments = segment_lengths
+    total = total_length
+    if segments is None or total is None:
+        metrics = route_metrics(coordinates)
+        segments = metrics["_segment_lengths"]
+        total = float(metrics["_geometry_length_m"])
     if total <= 0.0:
         return coordinates[0]
 
@@ -246,10 +453,7 @@ def route_is_usable(route: dict) -> bool:
     coords = route.get("coordinates") or []
     if len(coords) < 2:
         return float(route.get("cost", 0.0)) <= 0.0
-    return all(
-        distance_m(coords[idx], coords[idx + 1]) <= MAX_ROUTE_SEGMENT_METERS
-        for idx in range(len(coords) - 1)
-    )
+    return float(with_route_metrics(route)["_max_segment_m"]) <= MAX_ROUTE_SEGMENT_METERS
 
 
 def route_reference(route: dict, route_registry: dict[str, dict]) -> dict:
@@ -294,6 +498,72 @@ def dispatch_for_export(dispatch: dict, route_registry: dict[str, dict]) -> dict
         "cars": dispatch.get("cars", []),
         "summary": dispatch.get("summary", {}),
     }
+
+
+def build_scenario_snapshots(
+    graph: MapGraph,
+    grid: dict,
+    seed: int,
+    fleet_size: int,
+    step_minutes: int,
+    route_registry: dict[str, dict],
+    event: dict | None = None,
+    candidate_limit: int = 6,
+) -> list[dict]:
+    dispatcher = StatefulMapDispatch(
+        graph,
+        grid,
+        seed=seed,
+        fleet_size=fleet_size,
+        candidate_limit=candidate_limit,
+    )
+    snapshots = []
+    step_seconds = step_minutes * 60
+    arrival_window = step_minutes / 15.0
+    event_arrival_multiplier = 1.0 + (float(event.get("arrival_boost", 0.0)) if event else 0.0)
+    base_arrival_rate = 2.8 * arrival_window * event_arrival_multiplier
+    max_new_people = max(2, round(6 * arrival_window * event_arrival_multiplier))
+
+    for timestep in range(0, 24 * 60, step_minutes):
+        demand = DemandGenerator(grid=grid, seed=seed + timestep + 1)
+        traffic = TrafficGenerator(
+            grid=grid,
+            seed=seed + timestep + 2,
+            demand_coupling=0.34 if event else 0.12,
+        )
+        people_generator = PeopleGenerator(
+            grid=grid,
+            seed=seed + timestep + 3,
+            base_arrival_rate=base_arrival_rate,
+            max_new_people_per_tick=max_new_people,
+        )
+        demand_heatmap = demand.get_heatmap(timestep)
+        demand_heatmap = apply_event_pressure(demand_heatmap, grid, event, "demand_boost")
+        traffic_heatmap = traffic.get_heatmap(timestep, demand_heatmap)
+        people = people_generator.generate(timestep, demand_heatmap, traffic_heatmap)
+        people = retarget_people_for_event(people, grid, demand_heatmap, event, timestep, seed)
+        map_payload = dispatcher.step(timestep, people, event=event)
+        greedy_stats = map_payload["map_greedy_stats"]
+        map_dispatch = dispatch_for_export(map_payload["map_dispatch"], route_registry)
+        snapshots.append(
+            {
+                "timestep": timestep,
+                "new_people": [person.to_dict() for person in people],
+                "summary": {
+                    "num_new_people": len(people),
+                    "top_demand_cells": top_heatmap_cells(demand_heatmap, 12),
+                    "traffic_bottlenecks": top_heatmap_cells(traffic_heatmap, 18),
+                    "dispatch": map_dispatch["summary"],
+                    "greedy_stats": greedy_stats,
+                },
+                "map_dispatch": map_dispatch,
+                "map_people": map_payload["map_people"],
+                "map_greedy_stats": greedy_stats,
+            }
+        )
+        dispatcher.advance(step_seconds)
+
+    return snapshots
 
 
 class StatefulMapDispatch:
@@ -345,10 +615,10 @@ class StatefulMapDispatch:
             )
             self.total_requests += 1
 
-    def step(self, timestep: int, people: list) -> dict:
+    def step(self, timestep: int, people: list, event: dict | None = None) -> dict:
         self._expire_requests(timestep)
         self.add_requests(people, timestep)
-        new_assignments = self._assign_waiting(timestep)
+        new_assignments = self._assign_waiting(timestep, event)
         active_assignments = []
         for car in self.cars:
             assignment = car.get("assignment")
@@ -371,7 +641,7 @@ class StatefulMapDispatch:
         stalled_cars = len(self.cars) - active_cars
         matched_requests = self.completed_trips + len(active_people_ids)
         demand_served = matched_requests / max(1, self.total_requests) * 100.0
-        wait_time = self.total_wait_minutes + self._queued_customer_wait(timestep)
+        wait_time = self.total_wait_minutes + self._queued_customer_wait(timestep, event)
         current_utilization = active_cars / max(1, len(self.cars)) * 100.0
         self.utilization_pct_total += current_utilization
         self.utilization_samples += 1
@@ -417,7 +687,12 @@ class StatefulMapDispatch:
             total_cost = max(1.0, float(route["cost"]))
             car["route_elapsed"] = min(total_cost, float(car["route_elapsed"]) + float(seconds))
             progress = car["route_elapsed"] / total_cost
-            car["position"] = interpolate_position(route["coordinates"], progress)
+            car["position"] = interpolate_position(
+                route["coordinates"],
+                progress,
+                route.get("_segment_lengths"),
+                route.get("_geometry_length_m"),
+            )
             car["grid_cell"] = grid_cell_for_position(car["position"], self.grid)
             car["status"] = "to_pickup" if car["route_elapsed"] < assignment["pickup_route"]["cost"] else "to_dropoff"
             if car["route_elapsed"] >= total_cost:
@@ -455,7 +730,7 @@ class StatefulMapDispatch:
                 retained.append(item)
         self.pending = retained
 
-    def _assign_waiting(self, timestep: int) -> list[dict]:
+    def _assign_waiting(self, timestep: int, event: dict | None = None) -> list[dict]:
         hour = (timestep // 60) % 24
         waiting = [item for item in self.pending if item["payload"].get("status") != "assigned"]
         idle_cars = [car for car in self.cars if car["status"] == "idle" and car.get("assignment") is None]
@@ -475,7 +750,7 @@ class StatefulMapDispatch:
 
             best = None
             for idle_idx, car in candidates:
-                route_to_pickup = self.graph.route(int(car["node_id"]), pickup_node_id, hour)
+                route_to_pickup = self.graph.route(int(car["node_id"]), pickup_node_id, hour, event)
                 if not route_is_usable(route_to_pickup):
                     continue
                 cost = float(route_to_pickup["cost"])
@@ -485,12 +760,13 @@ class StatefulMapDispatch:
                 continue
 
             _, idle_idx, car, pickup_route = best
-            dropoff_route = self.graph.route(pickup_node_id, dropoff_node_id, hour)
+            dropoff_route = self.graph.route(pickup_node_id, dropoff_node_id, hour, event)
             if not route_is_usable(dropoff_route):
                 continue
             full_coords = merge_route_coordinates(pickup_route, dropoff_route)
             full_cost = float(pickup_route["cost"]) + float(dropoff_route["cost"])
-            if not route_is_usable({"coordinates": full_coords, "cost": full_cost, "fallback": False}):
+            full_route = with_route_metrics({"coordinates": full_coords, "cost": full_cost, "fallback": False})
+            if not route_is_usable(full_route):
                 continue
             idle_cars.pop(idle_idx)
             wait_minutes = max(0.0, float(timestep - int(item["created_at"]))) + float(pickup_route["cost"]) / 60.0
@@ -512,6 +788,9 @@ class StatefulMapDispatch:
                     "coordinates": full_coords,
                     "cost": round(full_cost, 6),
                     "fallback": bool(pickup_route.get("fallback")) or bool(dropoff_route.get("fallback")),
+                    "_segment_lengths": full_route["_segment_lengths"],
+                    "_geometry_length_m": full_route["_geometry_length_m"],
+                    "_max_segment_m": full_route["_max_segment_m"],
                 },
                 "total_cost": round(full_cost, 6),
             }
@@ -532,7 +811,7 @@ class StatefulMapDispatch:
 
         return assignments
 
-    def _queued_customer_wait(self, timestep: int) -> float:
+    def _queued_customer_wait(self, timestep: int, event: dict | None = None) -> float:
         hour = (timestep // 60) % 24
         waiting = [item for item in self.pending if item["payload"].get("status") != "assigned"]
         if not waiting:
@@ -543,16 +822,26 @@ class StatefulMapDispatch:
         for item in waiting:
             payload = item["payload"]
             pickup_node_id = int(payload["pickup_node_id"])
+            pickup_position = payload["pickup_position"]
             request_age = max(0.0, float(timestep - int(item["created_at"])))
             best_eta = None
-            for car in self.cars:
+            candidate_cars = sorted(
+                self.cars,
+                key=lambda car: distance_m(
+                    car.get("position")
+                    or car.get("assignment", {}).get("dropoff_position")
+                    or pickup_position,
+                    pickup_position,
+                ),
+            )[: self.candidate_limit]
+            for car in candidate_cars:
                 cache_key = (car["id"], pickup_node_id)
                 if cache_key in car_eta_cache:
                     eta = car_eta_cache[cache_key]
                 else:
                     assignment = car.get("assignment")
                     if assignment is None:
-                        pickup_route = self.graph.route(int(car["node_id"]), pickup_node_id, hour)
+                        pickup_route = self.graph.route(int(car["node_id"]), pickup_node_id, hour, event)
                         if not route_is_usable(pickup_route):
                             continue
                         eta = float(pickup_route["cost"]) / 60.0
@@ -562,7 +851,12 @@ class StatefulMapDispatch:
                             0.0,
                             float(route["cost"]) - float(car.get("route_elapsed", 0.0)),
                         ) / 60.0
-                        reposition_route = self.graph.route(int(assignment["dropoff_node_id"]), pickup_node_id, hour)
+                        reposition_route = self.graph.route(
+                            int(assignment["dropoff_node_id"]),
+                            pickup_node_id,
+                            hour,
+                            event,
+                        )
                         if not route_is_usable(reposition_route):
                             continue
                         reposition = float(reposition_route["cost"]) / 60.0
@@ -624,57 +918,42 @@ def main() -> None:
         load_json(Path(args.edges)),
         load_json(Path(args.edges_geojson)),
     )
-    dispatcher = StatefulMapDispatch(
+    route_registry: dict[str, dict] = {}
+    step_minutes = max(1, args.step_minutes)
+    print("Building base scenario...")
+    snapshots = build_scenario_snapshots(
         graph,
         grid,
         seed=args.seed,
         fleet_size=args.fleet_size,
-        candidate_limit=6,
+        step_minutes=step_minutes,
+        route_registry=route_registry,
     )
-    snapshots = []
-    route_registry: dict[str, dict] = {}
-    step_minutes = max(1, args.step_minutes)
-    step_seconds = step_minutes * 60
-    arrival_window = step_minutes / 15.0
-    base_arrival_rate = 2.8 * arrival_window
-    max_new_people = max(2, round(6 * arrival_window))
-    for timestep in range(0, 24 * 60, step_minutes):
-        demand = DemandGenerator(grid=grid, seed=args.seed + timestep + 1)
-        traffic = TrafficGenerator(grid=grid, seed=args.seed + timestep + 2)
-        people_generator = PeopleGenerator(
-            grid=grid,
-            seed=args.seed + timestep + 3,
-            base_arrival_rate=base_arrival_rate,
-            max_new_people_per_tick=max_new_people,
-        )
-        demand_heatmap = demand.get_heatmap(timestep)
-        traffic_heatmap = traffic.get_heatmap(timestep, demand_heatmap)
-        people = people_generator.generate(timestep, demand_heatmap, traffic_heatmap)
-        map_payload = dispatcher.step(timestep, people)
-        greedy_stats = map_payload["map_greedy_stats"]
-        map_dispatch = dispatch_for_export(map_payload["map_dispatch"], route_registry)
-        snapshot = {
-            "timestep": timestep,
-            "new_people": [person.to_dict() for person in people],
-            "summary": {
-                "num_new_people": len(people),
-                "top_demand_cells": demand.top_demand_cells(5, timestep),
-                "traffic_bottlenecks": traffic.top_bottlenecks(5, timestep, demand_heatmap),
-                "dispatch": map_dispatch["summary"],
-                "greedy_stats": greedy_stats,
-            },
-            "map_dispatch": map_dispatch,
-            "map_people": map_payload["map_people"],
-            "map_greedy_stats": greedy_stats,
+    event_scenarios = {}
+    event_step_minutes = max(step_minutes, 15)
+    for event in EVENT_PRESETS:
+        print(f"Building event scenario: {event['label']}...")
+        event_scenarios[event["id"]] = {
+            "step_minutes": event_step_minutes,
+            "snapshots": build_scenario_snapshots(
+                graph,
+                grid,
+                seed=args.seed,
+                fleet_size=args.fleet_size,
+                step_minutes=event_step_minutes,
+                route_registry=route_registry,
+                event=event,
+                candidate_limit=1,
+            )
         }
-        snapshots.append(snapshot)
-        dispatcher.advance(step_seconds)
 
     payload = {
         "seed": args.seed,
         "fleet_size": args.fleet_size,
         "step_minutes": step_minutes,
         "route_segment_max_meters": MAX_ROUTE_SEGMENT_METERS,
+        "events": EVENT_PRESETS,
+        "event_scenarios": event_scenarios,
         "routes": route_registry,
         "snapshots": snapshots,
     }

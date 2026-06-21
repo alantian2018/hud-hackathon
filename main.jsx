@@ -274,6 +274,40 @@ function downtownCongestionBoost(feature) {
   return boost;
 }
 
+function circlePolygon(center, radiusMeters, steps = 72) {
+  if (!center) return [];
+  const [lon, lat] = center;
+  const latRadius = radiusMeters / 111320;
+  const lonRadius = radiusMeters / (111320 * Math.cos((lat * Math.PI) / 180));
+  const coords = [];
+  for (let i = 0; i <= steps; i++) {
+    const angle = (i / steps) * Math.PI * 2;
+    coords.push([lon + Math.cos(angle) * lonRadius, lat + Math.sin(angle) * latRadius]);
+  }
+  return coords;
+}
+
+function makeEventFeatureCollection(event) {
+  if (!event) return {type: "FeatureCollection", features: []};
+  return {
+    type: "FeatureCollection",
+    features: [
+      {
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [circlePolygon(event.center, event.radius_m ?? 1000)]
+        },
+        properties: {
+          id: event.id,
+          label: event.label,
+          description: event.description
+        }
+      }
+    ]
+  };
+}
+
 function commuteDirectionBoost(feature, hour) {
   const endpoints = edgeEndpoints(feature);
   if (!endpoints) return 0;
@@ -315,6 +349,29 @@ function effectiveCongestionForEdge(feature, hour) {
   const displaySensitivity =
     roadSensitivity * 0.72 + coreBoost * 0.5 * downtownActivityFactor(hour) + commuteBoost + waveBoost;
   return 1 + trafficFloor + (base - 1) * displaySensitivity;
+}
+
+function generatedTrafficMultiplierForEdge(feature, snapshot, grid) {
+  const hotspots = snapshot?.summary?.traffic_bottlenecks ?? [];
+  if (!hotspots.length || !grid) return 1;
+
+  const centroid = edgeCentroid(feature);
+  if (!centroid) return 1;
+  const cell = gridCellForPosition([centroid.longitude, centroid.latitude], grid);
+  if (!cell) return 1;
+
+  let influence = 0;
+  for (const hotspot of hotspots) {
+    const row = Number(hotspot.row);
+    const col = Number(hotspot.col);
+    const value = Number(hotspot.value);
+    if (!Number.isFinite(row) || !Number.isFinite(col) || !Number.isFinite(value)) continue;
+    const dist = Math.hypot(cell.row - row, cell.col - col);
+    const local = value * Math.exp(-(dist * dist) / (2 * 2.8 * 2.8));
+    influence = Math.max(influence, local);
+  }
+
+  return 1 + clamp((influence - 0.42) * 0.9, 0, 0.75);
 }
 
 function commuteWaveIntensity(feature, hour) {
@@ -1007,6 +1064,7 @@ function App() {
   const [showPeopleGrid, setShowPeopleGrid] = useState(true);
   const [mobilityWorld, setMobilityWorld] = useState(null);
   const [mobilityWorldStatus, setMobilityWorldStatus] = useState("loading");
+  const [activeEventId, setActiveEventId] = useState(null);
   const [telemetryCollapsed, setTelemetryCollapsed] = useState(true);
 
   // Simulated clock in minutes across a day.
@@ -1097,9 +1155,13 @@ function App() {
   const flowFactor = trafficFlowSpeedFactor(currentHourFloat);
   const tripClockMinute = normalizedClockMinute * flowFactor;
   const routeIndex = mobilityWorld?.routes ?? {};
+  const mobilityEvents = mobilityWorld?.events ?? [];
+  const activeEvent = mobilityEvents.find(event => event.id === activeEventId) ?? null;
+  const activeScenario = activeEventId ? mobilityWorld?.event_scenarios?.[activeEventId] : null;
 
   const mobilitySnapshot = useMemo(() => {
-    const snapshots = mobilityWorld?.snapshots ?? [];
+    const scenarioSnapshots = activeScenario?.snapshots;
+    const snapshots = scenarioSnapshots ?? mobilityWorld?.snapshots ?? [];
     if (!snapshots.length) return null;
     const sorted = [...snapshots].sort((a, b) => (a.timestep ?? 0) - (b.timestep ?? 0));
     let active = sorted[sorted.length - 1];
@@ -1111,8 +1173,8 @@ function App() {
       }
     }
     return active;
-  }, [mobilityWorld, clockMinute]);
-  const mobilityStepMinutes = mobilityWorld?.step_minutes ?? 15;
+  }, [mobilityWorld, activeScenario, clockMinute]);
+  const mobilityStepMinutes = activeScenario?.step_minutes ?? mobilityWorld?.step_minutes ?? 15;
 
   const nodeCountsByCell = useMemo(
     () => makeNodeCountsByGridCell(ppoNodes, populationGrid),
@@ -1158,7 +1220,11 @@ function App() {
   const currentHourCongestion = useMemo(() => {
     if (!network?.features?.length) return {mean: 1, p50: 1, p90: 1, hotShare: 0};
     const vals = network.features
-      .map(f => effectiveCongestionForEdge(f, currentHourFloat))
+      .map(
+        f =>
+          effectiveCongestionForEdge(f, currentHourFloat) *
+          generatedTrafficMultiplierForEdge(f, mobilitySnapshot, populationGrid)
+      )
       .filter(v => typeof v === "number" && !Number.isNaN(v))
       .sort((a, b) => a - b);
     if (!vals.length) return {mean: 1, p50: 1, p90: 1, hotShare: 0};
@@ -1166,7 +1232,7 @@ function App() {
     const mean = vals.reduce((acc, v) => acc + v, 0) / vals.length;
     const hotShare = vals.filter(v => v >= 2.5).length / vals.length;
     return {mean, p50: q(0.5), p90: q(0.9), hotShare};
-  }, [network, currentHourFloat]);
+  }, [network, currentHourFloat, mobilitySnapshot, populationGrid]);
 
   const edgeLayer = useMemo(() => {
     if (!network) return null;
@@ -1179,18 +1245,22 @@ function App() {
       lineWidthMinPixels: showGreedySim ? 0.75 : 1.25,
       lineWidthMaxPixels: showGreedySim ? 5 : 8,
       getLineWidth: f => {
-        const congestion = effectiveCongestionForEdge(f, currentHourFloat);
+        const congestion =
+          effectiveCongestionForEdge(f, currentHourFloat) *
+          generatedTrafficMultiplierForEdge(f, mobilitySnapshot, populationGrid);
         const t = clamp((congestion - 1.0) / (4.8 - 1.0), 0, 1);
         return showGreedySim ? 0.65 + t * 2.7 : 0.9 + t * 5.4;
       },
       getLineColor: f => {
-        const congestion = effectiveCongestionForEdge(f, currentHourFloat);
+        const congestion =
+          effectiveCongestionForEdge(f, currentHourFloat) *
+          generatedTrafficMultiplierForEdge(f, mobilitySnapshot, populationGrid);
         const [r, g, b] = trafficColorFromCongestion(congestion);
         return [r, g, b, showGreedySim ? 130 : 245];
       },
       updateTriggers: {
-        getLineWidth: [currentHourFloat, showGreedySim],
-        getLineColor: [currentHourFloat, showGreedySim]
+        getLineWidth: [currentHourFloat, showGreedySim, mobilitySnapshot, populationGrid],
+        getLineColor: [currentHourFloat, showGreedySim, mobilitySnapshot, populationGrid]
       },
       pickable: true,
       autoHighlight: true,
@@ -1201,7 +1271,9 @@ function App() {
         const speed = p.hourly_speed_kph?.[currentHour];
         const ttime = p.hourly_travel_time_s?.[currentHour];
         const baseCong = p.hourly_congestion_factor?.[currentHour] ?? 1;
-        const simCong = effectiveCongestionForEdge(object, currentHourFloat);
+        const simCong =
+          effectiveCongestionForEdge(object, currentHourFloat) *
+          generatedTrafficMultiplierForEdge(object, mobilitySnapshot, populationGrid);
         const multiplier = simCong / Math.max(0.05, baseCong);
         const simSpeed = typeof speed === "number" ? speed / multiplier : speed;
         const simTime = typeof ttime === "number" ? ttime * multiplier : ttime;
@@ -1215,7 +1287,7 @@ function App() {
         };
       }
     });
-  }, [network, currentHour, currentHourFloat, globalCongestionScale, showGreedySim]);
+  }, [network, currentHour, currentHourFloat, globalCongestionScale, showGreedySim, mobilitySnapshot, populationGrid]);
 
   const commuteWaveLayer = useMemo(() => {
     if (!network || showGreedySim) return null;
@@ -1454,6 +1526,28 @@ function App() {
     });
   }, [showCarGrid, carPresenceGridGeoJson]);
 
+  const eventAreaLayer = useMemo(() => {
+    if (!activeEvent) return null;
+    return new GeoJsonLayer({
+      id: "active-event-area",
+      data: makeEventFeatureCollection(activeEvent),
+      stroked: true,
+      filled: true,
+      pickable: true,
+      autoHighlight: true,
+      highlightColor: [255, 255, 255, 70],
+      lineWidthMinPixels: 2,
+      getFillColor: [250, 204, 21, 44],
+      getLineColor: [250, 204, 21, 220],
+      getTooltip: ({object}) => {
+        if (!object) return null;
+        return {
+          text: `${object.properties?.label ?? "Event"}\n${object.properties?.description ?? ""}`
+        };
+      }
+    });
+  }, [activeEvent]);
+
   const greedyPeopleLayer = useMemo(() => {
     if (!showGreedySim || !mobilitySnapshot || !populationGrid) return null;
     return new GeoJsonLayer({
@@ -1601,6 +1695,7 @@ function App() {
   const layers = [
     carPresenceGridLayer,
     greedyPeopleGridLayer,
+    eventAreaLayer,
     edgeLayer,
     commuteWaveLayer,
     greedyRouteCasingLayer,
@@ -1644,7 +1739,7 @@ function App() {
     position: "absolute",
     zIndex: 10,
     margin: 12,
-    marginTop: 112,
+    marginTop: 158,
     width: 390,
     maxWidth: "calc(100vw - 24px)",
     overflow: "hidden",
@@ -1841,6 +1936,55 @@ function App() {
         ))}
       </div>
 
+      {mobilityEvents.length > 0 && (
+        <div
+          style={{
+            position: "absolute",
+            zIndex: 10,
+            top: 112,
+            left: 12,
+            display: "flex",
+            flexWrap: "wrap",
+            alignItems: "center",
+            gap: 8,
+            maxWidth: "calc(100vw - 24px)",
+            pointerEvents: "auto"
+          }}
+        >
+          <span
+            style={{
+              padding: "7px 9px",
+              background: "rgba(4,8,14,0.82)",
+              color: "white",
+              border: "1px solid rgba(120,150,180,0.34)",
+              fontFamily: "sans-serif",
+              fontSize: 13
+            }}
+          >
+            Events
+          </span>
+          {mobilityEvents.map(event => {
+            const active = activeEventId === event.id;
+            return (
+              <button
+                type="button"
+                key={event.id}
+                title={event.description}
+                onClick={() => setActiveEventId(id => (id === event.id ? null : event.id))}
+                style={{
+                  ...controlButtonStyle,
+                  background: active ? "#facc15" : "black",
+                  color: active ? "#111827" : "white",
+                  border: active ? "1px solid #fde68a" : "1px solid #333"
+                }}
+              >
+                {event.short_label ?? event.label}
+              </button>
+            );
+          })}
+        </div>
+      )}
+
       <div style={telemetryPanelStyle}>
         <button
           type="button"
@@ -1908,6 +2052,9 @@ function App() {
             <div style={{opacity: 0.78}}>
               Greedy dispatch: {mobilitySnapshot ? `loaded snapshot ${String(Math.floor((mobilitySnapshot.timestep ?? 0) / 60))
                 .padStart(2, "0")}:${String((mobilitySnapshot.timestep ?? 0) % 60).padStart(2, "0")}` : mobilityWorldStatus}
+            </div>
+            <div style={{opacity: 0.78}}>
+              Event scenario: {activeEvent ? activeEvent.label : "none"}
             </div>
             <div style={{opacity: 0.72}}>
               People grid: {showPeopleGrid ? "ON" : "OFF"} | {peopleGridStats.people} people | pickups{" "}
@@ -2022,6 +2169,7 @@ function App() {
           {legendBadge("Dropoff", "#ea4335")}
           {legendBadge("Active car node", "#34a853")}
           {legendBadge("Idle car node", "#bdbfc6")}
+          {activeEvent && legendBadge("Event zone", "#facc15")}
           <span style={{display: "inline-flex", alignItems: "center", gap: 7}}>
             <span
               style={{
@@ -2181,7 +2329,9 @@ function App() {
             const speed = p.hourly_speed_kph?.[currentHour];
             const ttime = p.hourly_travel_time_s?.[currentHour];
             const baseCong = p.hourly_congestion_factor?.[currentHour] ?? 1;
-            const simCong = effectiveCongestionForEdge(object, currentHourFloat);
+            const simCong =
+              effectiveCongestionForEdge(object, currentHourFloat) *
+              generatedTrafficMultiplierForEdge(object, mobilitySnapshot, populationGrid);
             const multiplier = simCong / Math.max(0.05, baseCong);
             const simSpeed = typeof speed === "number" ? speed / multiplier : speed;
             const simTime = typeof ttime === "number" ? ttime * multiplier : ttime;
