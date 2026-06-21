@@ -99,6 +99,45 @@ def test_no_policy_query_during_auto_pickup_and_dropoff() -> None:
     assert float(ts.dt_seconds) == 9.0
 
 
+def test_pickup_wait_reward_is_emitted_before_dropoff() -> None:
+    graph = build_synthetic_graph(
+        node_lonlat=[
+            (0.0, 0.0),
+            (1.0, 0.0),
+            (2.0, 0.0),
+            (3.0, 0.0),
+        ],
+        edges=[
+            {"source": 0, "target": 1, "travel_time_s": 5.0},
+            {"source": 1, "target": 2, "travel_time_s": 100.0},
+            {"source": 2, "target": 0, "travel_time_s": 1.0},
+            {"source": 3, "target": 0, "travel_time_s": 6.0},
+        ],
+    )
+    params = make_env_params(
+        graph,
+        max_cars=2,
+        max_requests=4,
+        initial_car_nodes=[0, 3],
+        preplanned_requests=[{"spawn_time_s": 2.0, "origin": 1, "destination": 2}],
+        episode_seconds=300.0,
+    )
+    state, _ = reset(jax.random.PRNGKey(0), params)
+
+    state, ts = step(state, jnp.int32(0), params)
+    assert int(state.current_car_id) == 1
+    assert float(ts.reward) == 0.0
+
+    state, ts = step(state, jnp.int32(0), params)
+
+    assert float(state.time_seconds) == 6.0
+    assert int(state.request_status[0]) == REQUEST_ONBOARD
+    assert int(state.metrics.completed_requests) == 0
+    assert int(state.metrics.recent_pickup_wait_count) == 1
+    assert math.isclose(float(ts.reward), -3.0 / 60.0, rel_tol=1e-6)
+    assert math.isclose(float(state.metrics.aggregate_reward), -3.0 / 60.0, rel_tol=1e-6)
+
+
 def test_directed_nearest_car_assignment_uses_eta_not_node_id() -> None:
     params = make_env_params(tiny_graph(), max_cars=2, max_requests=4, initial_car_nodes=[0, 2])
     state, _ = reset(jax.random.PRNGKey(0), params)

@@ -90,6 +90,23 @@ def test_js_visual_request_schedule_uses_mobility_world_minutes_and_grid_snappin
     assert float(schedule.patience_seconds[0]) == float(first_person["patience"] * 60)
 
 
+def test_js_visual_request_schedule_caps_infinite_episode_to_one_wrapped_day() -> None:
+    graph = load_public_data_graph(DATA_DIR, include_routing=False)
+    start = 7.0 * 60.0 * 60.0
+
+    schedule = build_js_visual_request_schedule(
+        DATA_DIR,
+        graph,
+        start_time_seconds=start,
+        episode_seconds=np.inf,
+    )
+
+    assert schedule.spawn_times_s.shape[0] > 0
+    assert np.isfinite(schedule.spawn_times_s).all()
+    assert float(schedule.spawn_times_s.min()) >= start
+    assert float(schedule.spawn_times_s.max()) < start + 24.0 * 60.0 * 60.0
+
+
 def test_make_spawned_env_params_defaults_sf_to_density_top_up() -> None:
     graph = load_public_data_graph(DATA_DIR, include_routing=False)
 

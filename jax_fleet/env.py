@@ -641,7 +641,7 @@ def _assign_queued_requests(
         should_assign = (loop_state.request_status[request_id] == REQUEST_QUEUED) & (car_id >= 0)
         return jax.lax.cond(
             should_assign,
-            lambda c: (_assign_request_to_car(c[0], params, request_id, car_id), c[1]),
+            lambda c: _assign_request_to_car(c[0], params, request_id, car_id, c[1]),
             lambda c: c,
             (loop_state, loop_reward),
         )
@@ -656,31 +656,34 @@ def _assign_request_to_car(
     params: EnvParams,
     request_id,
     car,
-) -> EnvState:
+    reward,
+) -> tuple[EnvState, jnp.ndarray]:
     origin = state.request_origin_nodes[request_id]
     dest = state.request_dest_nodes[request_id]
     at_origin = state.car_nodes[car] == origin
     state = state.replace(request_assigned_car_ids=state.request_assigned_car_ids.at[request_id].set(car))
 
-    def pickup_now(s: EnvState):
-        s = _record_pickup_wait(s, request_id)
+    def pickup_now(carry):
+        s, r = carry
+        s, r = _record_pickup_wait_reward(s, request_id, params, r)
         s = s.replace(
             request_status=s.request_status.at[request_id].set(REQUEST_ONBOARD),
             request_pickup_times=s.request_pickup_times.at[request_id].set(s.time_seconds),
             car_request_ids=s.car_request_ids.at[car].set(request_id),
             car_goal_nodes=s.car_goal_nodes.at[car].set(dest),
         )
-        return _start_auto_edge(s, params, car, dest, request_id, CAR_TO_DROPOFF)
+        return _start_auto_edge(s, params, car, dest, request_id, CAR_TO_DROPOFF), r
 
-    def drive_to_pickup(s: EnvState):
+    def drive_to_pickup(carry):
+        s, r = carry
         s = s.replace(
             request_status=s.request_status.at[request_id].set(REQUEST_ASSIGNED),
             car_request_ids=s.car_request_ids.at[car].set(request_id),
             car_goal_nodes=s.car_goal_nodes.at[car].set(origin),
         )
-        return _start_auto_edge(s, params, car, origin, request_id, CAR_TO_PICKUP)
+        return _start_auto_edge(s, params, car, origin, request_id, CAR_TO_PICKUP), r
 
-    return jax.lax.cond(at_origin, pickup_now, drive_to_pickup, state)
+    return jax.lax.cond(at_origin, pickup_now, drive_to_pickup, (state, reward))
 
 
 def _finish_pickup(
@@ -691,7 +694,7 @@ def _finish_pickup(
 ) -> tuple[EnvState, jnp.ndarray]:
     request_id = jnp.clip(state.car_request_ids[car], 0, params.max_requests - 1)
     dest = state.request_dest_nodes[request_id]
-    state = _record_pickup_wait(state, request_id)
+    state, reward = _record_pickup_wait_reward(state, request_id, params, reward)
     state = state.replace(
         request_status=state.request_status.at[request_id].set(REQUEST_ONBOARD),
         request_pickup_times=state.request_pickup_times.at[request_id].set(state.time_seconds),
@@ -708,8 +711,6 @@ def _finish_dropoff(
     car,
 ) -> tuple[EnvState, jnp.ndarray]:
     request_id = jnp.clip(state.car_request_ids[car], 0, params.max_requests - 1)
-    wait = jnp.maximum(0.0, state.request_pickup_times[request_id] - state.request_spawn_times[request_id])
-    reward = reward - params.wait_time_scale * wait
     metrics = state.metrics.replace(
         completed_requests=state.metrics.completed_requests + jnp.asarray(1, dtype=jnp.int32),
     )
@@ -724,9 +725,29 @@ def _finish_dropoff(
     return state, reward
 
 
+def _pickup_wait_seconds(state: EnvState, request_id):
+    request_id = jnp.clip(
+        jnp.asarray(request_id, dtype=jnp.int32),
+        0,
+        state.request_spawn_times.shape[0] - 1,
+    )
+    return jnp.maximum(0.0, state.time_seconds - state.request_spawn_times[request_id])
+
+
+def _record_pickup_wait_reward(
+    state: EnvState,
+    request_id,
+    params: EnvParams,
+    reward,
+) -> tuple[EnvState, jnp.ndarray]:
+    wait = _pickup_wait_seconds(state, request_id)
+    state = _record_pickup_wait(state, request_id)
+    return state, reward - params.wait_time_scale * wait
+
+
 def _record_pickup_wait(state: EnvState, request_id) -> EnvState:
     request_id = jnp.clip(jnp.asarray(request_id, dtype=jnp.int32), 0, state.request_spawn_times.shape[0] - 1)
-    wait = jnp.maximum(0.0, state.time_seconds - state.request_spawn_times[request_id])
+    wait = _pickup_wait_seconds(state, request_id)
     slot = jnp.mod(state.metrics.recent_pickup_wait_index, _RECENT_PICKUP_WAIT_WINDOW)
     metrics = state.metrics.replace(
         pickup_wait_seconds=state.metrics.pickup_wait_seconds + wait,
