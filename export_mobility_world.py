@@ -11,6 +11,9 @@ import random
 from mobility_sim import DemandGenerator, PeopleGenerator, TrafficGenerator, build_people_grid
 
 
+MAX_ROUTE_SEGMENT_METERS = 350.0
+
+
 def load_grid(path: Path) -> dict | tuple[int, int]:
     if path.exists():
         return json.loads(path.read_text(encoding="utf-8"))
@@ -236,6 +239,18 @@ def merge_route_coordinates(*routes: dict) -> list[list[float]]:
     return coordinates
 
 
+def route_is_usable(route: dict) -> bool:
+    if route.get("fallback"):
+        return False
+    coords = route.get("coordinates") or []
+    if len(coords) < 2:
+        return float(route.get("cost", 0.0)) <= 0.0
+    return all(
+        distance_m(coords[idx], coords[idx + 1]) <= MAX_ROUTE_SEGMENT_METERS
+        for idx in range(len(coords) - 1)
+    )
+
+
 class StatefulMapDispatch:
     def __init__(
         self,
@@ -416,6 +431,8 @@ class StatefulMapDispatch:
             best = None
             for idle_idx, car in candidates:
                 route_to_pickup = self.graph.route(int(car["node_id"]), pickup_node_id, hour)
+                if not route_is_usable(route_to_pickup):
+                    continue
                 cost = float(route_to_pickup["cost"])
                 if best is None or cost < best[0]:
                     best = (cost, idle_idx, car, route_to_pickup)
@@ -423,10 +440,14 @@ class StatefulMapDispatch:
                 continue
 
             _, idle_idx, car, pickup_route = best
-            idle_cars.pop(idle_idx)
             dropoff_route = self.graph.route(pickup_node_id, dropoff_node_id, hour)
+            if not route_is_usable(dropoff_route):
+                continue
             full_coords = merge_route_coordinates(pickup_route, dropoff_route)
             full_cost = float(pickup_route["cost"]) + float(dropoff_route["cost"])
+            if not route_is_usable({"coordinates": full_coords, "cost": full_cost, "fallback": False}):
+                continue
+            idle_cars.pop(idle_idx)
             wait_minutes = max(0.0, float(timestep - int(item["created_at"]))) + float(pickup_route["cost"]) / 60.0
             assignment = {
                 "car_id": car["id"],
@@ -486,16 +507,20 @@ class StatefulMapDispatch:
                 else:
                     assignment = car.get("assignment")
                     if assignment is None:
-                        eta = float(self.graph.route(int(car["node_id"]), pickup_node_id, hour)["cost"]) / 60.0
+                        pickup_route = self.graph.route(int(car["node_id"]), pickup_node_id, hour)
+                        if not route_is_usable(pickup_route):
+                            continue
+                        eta = float(pickup_route["cost"]) / 60.0
                     else:
                         route = assignment["route"]
                         remaining_current = max(
                             0.0,
                             float(route["cost"]) - float(car.get("route_elapsed", 0.0)),
                         ) / 60.0
-                        reposition = float(
-                            self.graph.route(int(assignment["dropoff_node_id"]), pickup_node_id, hour)["cost"]
-                        ) / 60.0
+                        reposition_route = self.graph.route(int(assignment["dropoff_node_id"]), pickup_node_id, hour)
+                        if not route_is_usable(reposition_route):
+                            continue
+                        reposition = float(reposition_route["cost"]) / 60.0
                         eta = remaining_current + reposition
                     car_eta_cache[cache_key] = eta
                 if best_eta is None or eta < best_eta:

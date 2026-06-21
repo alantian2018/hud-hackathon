@@ -51,6 +51,7 @@ const PEOPLE_GRID_BOTH_FILL = [168, 85, 247, 190];
 const PEOPLE_GRID_BOTH_LINE = [216, 180, 254, 245];
 const ROUTE_BLUE = [66, 133, 244, 245];
 const ROUTE_CASING = [232, 240, 254, 245];
+const MAX_VISIBLE_ROUTE_SEGMENT_METERS = 350;
 const ACTIVE_CAR_GREEN = [52, 168, 83, 245];
 const IDLE_CAR_GRAY = [189, 193, 198, 230];
 const UBER_CAR_ICON_SVG = encodeURIComponent(
@@ -771,6 +772,24 @@ function routePathFromProgress(coordinates, progress) {
   return [coordinates[coordinates.length - 1]];
 }
 
+function routeSegmentMeters(a, b) {
+  if (!a || !b) return 0;
+  const meanLat = (((a[1] ?? 0) + (b[1] ?? 0)) / 2) * Math.PI / 180;
+  const dx = ((b[0] ?? 0) - (a[0] ?? 0)) * Math.cos(meanLat) * 111320;
+  const dy = ((b[1] ?? 0) - (a[1] ?? 0)) * 111320;
+  return Math.hypot(dx, dy);
+}
+
+function routeCoordinatesAreUsable(coordinates) {
+  if (!Array.isArray(coordinates) || coordinates.length < 2) return false;
+  for (let i = 0; i < coordinates.length - 1; i++) {
+    if (routeSegmentMeters(coordinates[i], coordinates[i + 1]) > MAX_VISIBLE_ROUTE_SEGMENT_METERS) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function snapshotElapsedMinutes(snapshot, clockMinute, stepMinutes) {
   if (!snapshot) return 0;
   const start = snapshot.timestep ?? 0;
@@ -808,6 +827,7 @@ function makeGreedyRouteFeatureCollection(snapshot, grid, kindFilter = null, clo
       assignment.active_route?.coordinates ??
       assignment.dropoff_route?.coordinates ??
       routePathToCoordinates(assignment.dropoff_route?.path, grid);
+    if (!routeCoordinatesAreUsable(activeCoords)) continue;
     const car = carById.get(assignment.car_id);
     const progress = activeRouteProgress(assignment, car, snapshot, clockMinute, stepMinutes);
     const remainingCoords = routePathFromProgress(activeCoords, progress);
@@ -844,7 +864,7 @@ function greedyCarPoints(snapshot, grid, clockMinute = 0, stepMinutes = 15) {
           [];
         const progress = activeRouteProgress(assignment, car, snapshot, clockMinute, stepMinutes);
         const animatedPosition =
-          assignment && routeCoords.length >= 2
+          assignment && routeCoordinatesAreUsable(routeCoords)
             ? interpolatePathPosition(routeCoords, progress)
             : null;
         return {
@@ -921,12 +941,12 @@ function App() {
   const [trips, setTrips] = useState(FALLBACK_TRIPS);
   const [datasetReady, setDatasetReady] = useState(false);
   const [showNodeDensity, setShowNodeDensity] = useState(false);
-  const [showCarGrid, setShowCarGrid] = useState(false);
+  const [showCarGrid, setShowCarGrid] = useState(true);
   const [showGreedySim, setShowGreedySim] = useState(true);
   const [showPeopleGrid, setShowPeopleGrid] = useState(true);
   const [mobilityWorld, setMobilityWorld] = useState(null);
   const [mobilityWorldStatus, setMobilityWorldStatus] = useState("loading");
-  const [telemetryCollapsed, setTelemetryCollapsed] = useState(false);
+  const [telemetryCollapsed, setTelemetryCollapsed] = useState(true);
 
   // Simulated clock in minutes across a day.
   useEffect(() => {
