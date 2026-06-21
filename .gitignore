@@ -1,4 +1,7 @@
 .vscode
+.venv
+*.egg-info
+.hud_eval.toml
 node_modules
 cache
 public

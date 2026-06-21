@@ -8,8 +8,10 @@ version = "0.1.0"
 description = "Headless JAX fleet repositioning backend beside the Deck.gl demo."
 requires-python = ">=3.11"
 dependencies = [
+  "fastmcp>=2.0.0",
   "jax",
   "flax",
+  "hud-python",
   "optax",
   "orbax-checkpoint",
   "numpy",

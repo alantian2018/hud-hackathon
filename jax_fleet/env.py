@@ -62,6 +62,7 @@ def make_env_params(
     max_requests: int = 128,
     initial_car_nodes: list[int] | np.ndarray | None = None,
     preplanned_requests: list[dict[str, Any]] | None = None,
+    manual_dispatch: bool = False,
     start_time_seconds: float = 0.0,
     episode_seconds: float = 3600.0,
     spawn_rate_per_minute: float = 0.0,
@@ -113,6 +114,7 @@ def make_env_params(
         max_requests=max_requests,
         raster_size=raster_size,
         max_event_steps=max_event_steps,
+        manual_dispatch=bool(manual_dispatch),
         target_active_requests=target_active,
         initial_car_nodes=jnp.asarray(initial, dtype=jnp.int32),
         start_time_seconds=jnp.asarray(start_time_seconds, dtype=jnp.float32),
@@ -259,7 +261,14 @@ def _process_events_at_time(
     state = _spawn_random_request_if_due(state, params)
     state, reward = _process_car_arrivals(state, params, reward)
     state = _spawn_density_top_up_requests(state, params)
-    state, reward = _assign_queued_requests(state, params, reward)
+    if params.manual_dispatch:
+        state = state.replace(
+            metrics=state.metrics.replace(
+                queued_requests=(state.request_status == REQUEST_QUEUED).sum().astype(jnp.int32)
+            )
+        )
+    else:
+        state, reward = _assign_queued_requests(state, params, reward)
     state = _refresh_decision(state, params)
     return state, reward
 
@@ -587,15 +596,36 @@ def _handle_car_arrival(
 
     def finish_reposition(carry):
         s, r = carry
-        return (
-            s.replace(
-                car_status=s.car_status.at[car].set(CAR_DECISION),
-                car_edge_ids=s.car_edge_ids.at[car].set(-1),
-                car_goal_nodes=s.car_goal_nodes.at[car].set(-1),
-                car_request_ids=s.car_request_ids.at[car].set(-1),
-            ),
-            r,
-        )
+        goal = s.car_goal_nodes[car]
+        at_goal = (goal < 0) | (s.car_nodes[car] == goal)
+
+        def finish(c):
+            inner, inner_reward = c
+            return (
+                inner.replace(
+                    car_status=inner.car_status.at[car].set(CAR_DECISION),
+                    car_edge_ids=inner.car_edge_ids.at[car].set(-1),
+                    car_goal_nodes=inner.car_goal_nodes.at[car].set(-1),
+                    car_request_ids=inner.car_request_ids.at[car].set(-1),
+                ),
+                inner_reward,
+            )
+
+        def continue_reposition(c):
+            inner, inner_reward = c
+            return (
+                _start_auto_edge(
+                    inner,
+                    params,
+                    car,
+                    inner.car_goal_nodes[car],
+                    jnp.asarray(-1, dtype=jnp.int32),
+                    CAR_REPOSITION,
+                ),
+                inner_reward,
+            )
+
+        return jax.lax.cond(at_goal, finish, continue_reposition, (s, r))
 
     def continue_or_finish_pickup(carry):
         s, r = carry

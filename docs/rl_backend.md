@@ -50,6 +50,29 @@ existing map artifacts. It is separate from the React/Deck.gl frontend.
 - Per-transition discount is
   `gamma ** (dt_seconds / discount_time_unit_seconds)`.
 
+## Manual / LLM Dispatch Wrapper
+
+`jax_fleet.dispatch_env.ManualDispatchEnv` adds a high-level control surface for
+LLM dispatch policies. It sets `manual_dispatch=True`, which keeps queued
+requests visible instead of automatically assigning them to the nearest
+eligible car. The policy acts only when cars are idle or have just finished a
+trip/reposition window.
+
+Supported macro actions are:
+
+```python
+{"car_id": 0, "action": "assign_request", "request_id": 3}
+{"car_id": 0, "action": "reposition", "target_compact_node_id": 412}
+{"car_id": 0, "action": "reposition", "grid_cell": [24, 31]}
+{"car_id": 0, "action": "wait", "duration_seconds": 30}
+```
+
+The wrapper reuses the existing routing tables, pickup/dropoff lifecycle,
+scene export, and sparse pickup-wait reward. It exposes helper methods for HUD
+or MCP tools: `get_dispatch_state`, `get_idle_cars`, `get_open_requests`,
+`get_eta_matrix`, `get_reposition_targets`, `simulate_dispatch_plan`, and
+`submit_dispatch_plan`.
+
 ## Observations
 
 Each timestep includes:

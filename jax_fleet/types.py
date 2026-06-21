@@ -40,6 +40,7 @@ class EnvParams:
     max_requests: int = struct.field(pytree_node=False)
     raster_size: int = struct.field(pytree_node=False, default=50)
     max_event_steps: int = struct.field(pytree_node=False, default=512)
+    manual_dispatch: bool = struct.field(pytree_node=False, default=False)
     target_active_requests: int = struct.field(pytree_node=False, default=0)
     initial_car_nodes: Array = struct.field(default_factory=lambda: jnp.zeros((1,), jnp.int32))
     start_time_seconds: Array = struct.field(default_factory=lambda: jnp.asarray(0.0, jnp.float32))
