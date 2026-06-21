@@ -33,7 +33,7 @@ Pages:
 - `/rl.html`: Agentic Fleet map using the precomputed policy feed.
 - `/compare.html`: greedy and Agentic Fleet maps side by side with one shared Start/Pause/Reset control.
 
-The MapTiler key currently lives at the top of `main.jsx` as `MAPTILER_KEY`. Replace it there if the basemap ever stops loading.
+Copy `.env.example` to `.env.local` and set `VITE_MAPTILER_KEY` to your MapTiler key if the basemap stops loading.
 
 ## Main Demo Controls
 

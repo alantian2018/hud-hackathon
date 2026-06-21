@@ -5,7 +5,7 @@ import {GeoJsonLayer, ScatterplotLayer} from "@deck.gl/layers";
 import {StaticMap} from "react-map-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
-const MAPTILER_KEY = "4WonZ3glTzG3MWfQd6gQ";
+const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY ?? "";
 const DAY_MINUTES = 24 * 60;
 const PRE_FRAME_MINUTE = -1;
 const SPEEDS = [0.5, 1, 4, 12, 30, 60];

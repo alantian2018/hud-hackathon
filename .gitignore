@@ -1,6 +1,9 @@
 .vscode
 .venv-hud
 .hud_eval.toml
+.env
+.env.local
+.env.*.local
 node_modules
 cache
 public/*

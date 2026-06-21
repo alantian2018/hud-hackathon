@@ -7,7 +7,7 @@ import {StaticMap} from "react-map-gl";
 import "mapbox-gl/dist/mapbox-gl.css";
 
 
-const MAPTILER_KEY = "4WonZ3glTzG3MWfQd6gQ";
+const MAPTILER_KEY = import.meta.env.VITE_MAPTILER_KEY ?? "";
 const POPULATION_HOURLY_MULTIPLIER = [
   0.82, 0.78, 0.74, 0.72, 0.74, 0.82, 0.96, 1.1, 1.18, 1.2, 1.16, 1.1,
   1.06, 1.02, 1.0, 1.04, 1.12, 1.2, 1.14, 1.04, 0.96, 0.9, 0.86, 0.84
@@ -1101,7 +1101,7 @@ function App() {
   const [clockMinute, setClockMinute] = useState(SIM_START_MINUTE);
   const [simSpeed, setSimSpeed] = useState(0.5);
   const [paused, setPaused] = useState(false);
-  const [keyMissing, setKeyMissing] = useState(MAPTILER_KEY === "YOUR_MAPTILER_KEY");
+  const [keyMissing, setKeyMissing] = useState(!MAPTILER_KEY);
   const [network, setNetwork] = useState(null);
   const [populationGrid, setPopulationGrid] = useState(null);
   const [ppoNodes, setPpoNodes] = useState([]);
@@ -2312,7 +2312,7 @@ function App() {
             lineHeight: 1.4
           }}
         >
-          ⚠️ Set <code>MAPTILER_KEY</code> at the top of this file to a free key
+          ⚠️ Set <code>VITE_MAPTILER_KEY</code> in <code>.env.local</code> to a free key
           from{" "}
           <a
             href="https://cloud.maptiler.com/account/keys/"
