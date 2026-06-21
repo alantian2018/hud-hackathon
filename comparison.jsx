@@ -1379,7 +1379,7 @@ function AgentTracePanel({snapshot, finalSnapshot, world, event, clockMinute, do
       zIndex: 16,
       right: 12,
       bottom: 12,
-      width: open ? "min(440px, calc(100vw - 24px))" : "min(292px, calc(100vw - 24px))",
+      width: open ? "min(340px, calc(100vw - 24px))" : "min(244px, calc(100vw - 24px))",
       borderRadius: 8,
       background: "rgba(4,8,14,0.9)",
       color: "white",
@@ -1434,7 +1434,7 @@ function AgentTracePanel({snapshot, finalSnapshot, world, event, clockMinute, do
             display: "grid",
             gridTemplateColumns: "1fr",
             gap: 8,
-            maxHeight: "min(48vh, 420px)",
+            maxHeight: "min(32vh, 260px)",
             overflowY: "auto",
             paddingRight: 2
           }}>
@@ -1915,7 +1915,7 @@ function ComparisonShell({mode}) {
   const data = useComparisonData();
   const [clockMinute, setClockMinute] = useState(PRE_FRAME_MINUTE);
   const [running, setRunning] = useState(false);
-  const [speed, setSpeed] = useState(0.5);
+  const [speed, setSpeed] = useState(1);
   const [activeEventId, setActiveEventId] = useState(null);
   const [viewState, setViewState] = useState(INITIAL_VIEW_STATE);
   const [impactDismissed, setImpactDismissed] = useState(false);
