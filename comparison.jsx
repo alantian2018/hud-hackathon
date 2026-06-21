@@ -1020,6 +1020,7 @@ function eventChoices(greedyWorld, rlWorld) {
 }
 
 function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, clockMinute, stepMinutes, viewState, setViewState, height, event}) {
+  const [panelOpen, setPanelOpen] = useState(true);
   const cars = useMemo(
     () => animatedCars(snapshot, routeIndex, clockMinute, stepMinutes),
     [snapshot, routeIndex, clockMinute, stepMinutes]
@@ -1250,44 +1251,71 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
         position: "absolute",
         top: 12,
         left: 12,
-        width: 320,
+        width: panelOpen ? 320 : 250,
         maxWidth: "calc(100% - 24px)",
-        padding: 12,
         borderRadius: 8,
         background: policy.panel,
         border: `1px solid ${policy.accent}66`,
         color: "white",
         fontFamily: "system-ui, sans-serif",
         boxShadow: "0 18px 52px rgba(0,0,0,0.38)",
-        pointerEvents: "none"
+        overflow: "hidden",
+        pointerEvents: "auto"
       }}>
-        <div style={{display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8}}>
-          <div style={{fontSize: 20, fontWeight: 850, color: policy.accent, lineHeight: 1.05}}>{policy.label}</div>
-          <div style={{
-            padding: "4px 7px",
+        <button
+          type="button"
+          aria-expanded={panelOpen}
+          onClick={() => setPanelOpen(value => !value)}
+          style={{
+            width: "100%",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "space-between",
+            gap: 10,
+            padding: "10px 11px",
+            border: 0,
+            borderBottom: panelOpen ? "1px solid rgba(148,163,184,0.16)" : 0,
+            background: "linear-gradient(90deg, rgba(14,165,233,0.14), rgba(20,184,166,0.08))",
+            color: "white",
+            cursor: "pointer",
+            font: "inherit",
+            textAlign: "left"
+          }}
+        >
+          <span style={{display: "flex", flexDirection: "column", gap: 2, minWidth: 0}}>
+            <span style={{fontSize: 20, fontWeight: 850, color: policy.accent, lineHeight: 1.05}}>{policy.label}</span>
+            <span style={{fontSize: 11, color: "rgba(226,232,240,0.66)", fontWeight: 720, textTransform: "uppercase", letterSpacing: 0}}>
+              {policy.id === "greedy" ? "Baseline" : "RL Policy"}
+            </span>
+          </span>
+          <span style={{
+            flex: "0 0 auto",
+            padding: "5px 8px",
             borderRadius: 999,
-            background: "rgba(255,255,255,0.08)",
-            border: "1px solid rgba(255,255,255,0.12)",
-            fontSize: 10,
-            fontWeight: 850,
-            color: "rgba(255,255,255,0.72)",
-            textTransform: "uppercase",
-            letterSpacing: 0
+            background: panelOpen ? "rgba(125,211,252,0.16)" : "rgba(148,163,184,0.12)",
+            border: "1px solid rgba(226,232,240,0.16)",
+            color: panelOpen ? "#bae6fd" : "rgba(226,232,240,0.82)",
+            fontSize: 11,
+            fontWeight: 850
           }}>
-            {policy.id === "greedy" ? "Baseline" : "RL Policy"}
-          </div>
-        </div>
-        <div style={{display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 8, marginTop: 12}}>
-          <Metric label="Trips" value={Number(metrics.completed_trips ?? 0).toLocaleString()} />
-          <Metric label="Profit" value={formatMoney(metrics.revenue)} />
-          <Metric label="Demand Served" value={formatPct(metrics.demand_served_pct)} />
-          <Metric label="Avg Wait" value={`${avgWaitMinutes(metrics).toFixed(1)}m`} />
-          <Metric label="Util." value={formatPct(metrics.avg_fleet_utilization_pct ?? metrics.fleet_utilization_pct)} />
-          <Metric label="Active" value={Number(metrics.active_cars ?? 0).toLocaleString()} />
-        </div>
-        {policy.id === "rl" && (
-          <div style={{fontSize: 12, opacity: 0.76, marginTop: 10}}>
-            Repositioning cars: {metrics.repositioning_cars ?? 0}
+            {panelOpen ? "Hide" : "Show"}
+          </span>
+        </button>
+        {panelOpen && (
+          <div style={{padding: 12}}>
+            <div style={{display: "grid", gridTemplateColumns: "repeat(2, minmax(0,1fr))", gap: 8}}>
+              <Metric label="Trips" value={Number(metrics.completed_trips ?? 0).toLocaleString()} />
+              <Metric label="Profit" value={formatMoney(metrics.revenue)} />
+              <Metric label="Demand Served" value={formatPct(metrics.demand_served_pct)} />
+              <Metric label="Avg Wait" value={`${avgWaitMinutes(metrics).toFixed(1)}m`} />
+              <Metric label="Util." value={formatPct(metrics.avg_fleet_utilization_pct ?? metrics.fleet_utilization_pct)} />
+              <Metric label="Active" value={Number(metrics.active_cars ?? 0).toLocaleString()} />
+            </div>
+            {policy.id === "rl" && (
+              <div style={{fontSize: 12, opacity: 0.76, marginTop: 10}}>
+                Repositioning cars: {metrics.repositioning_cars ?? 0}
+              </div>
+            )}
           </div>
         )}
       </div>
