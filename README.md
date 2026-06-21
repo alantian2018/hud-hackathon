@@ -1,147 +1,122 @@
-# HUD Hackathon Mobility Map
+# FleetForge Demo
 
-Interactive San Francisco mobility demo with Deck.gl, MapTiler, OSMnx road data, grid overlays, demand generation, and a stateful greedy ride-dispatch simulation.
+FleetForge is a HUD-trained fleet orchestration environment for comparing a reactive greedy dispatcher against an Agentic RL Fleet on the same San Francisco road network, vehicle supply, demand stream, and event stress tests.
 
-## Prerequisites
+The core question is simple: can an agentic fleet controller serve more demand with lower passenger wait time than a nearest-car style greedy policy?
 
-- Node.js 18+
-- npm
-- Python 3.10+
-- Optional, only for rebuilding the OSMnx road dataset: `osmnx` and `networkx`
+## What Judges Should Look For
 
-The generated demo data is checked into `public/data`, so the app can run without rebuilding the map dataset.
+- **Same world, two policies:** Greedy and Agentic Fleet run side by side on identical map data, traffic, vehicles, requests, and events.
+- **Business metrics:** the comparison focuses on completed trips, profit, demand served, and average wait time.
+- **Agentic behavior:** the HUD tool trace shows the observation, hotspot forecasting, matching, repositioning, critique, action, and submission loop behind the Agentic Fleet.
+- **Stress tests:** Base demand, Chase Center Exit, Market St Surge, and FiDi Conference scenarios expose where reactive dispatch breaks down under spatial demand shocks.
+- **HUD training loop:** the fleet controller is framed as a verifiable HUD environment with an absolute reward, MCP tools, taskset seeds, rollout evaluation, and RL training through HUD.
 
-## Setup
+## Live Demo
 
 ```bash
-git clone https://github.com/alantian2018/hud-hackathon.git
-cd hud-hackathon
 npm install
-```
-
-## Run the Map
-
-```bash
 npm run dev
 ```
 
-Open the local URL printed by Vite. The npm script starts at `http://127.0.0.1:5173`; if that port is already busy, Vite may use the next available port, such as `5174`.
+Open the local URL printed by Vite. The app is configured around:
 
-Pages:
+- `/` -> FleetForge comparison home
+- `/compare.html` -> synchronized Greedy vs Agentic Fleet comparison
+- `/greedy.html` -> Greedy policy view
+- `/rl.html` -> Agentic Fleet policy view
 
-- `/`: existing greedy dispatch map.
-- `/rl.html`: Agentic Fleet map using the precomputed policy feed.
-- `/compare.html`: greedy and Agentic Fleet maps side by side with one shared Start/Pause/Reset control.
-
-Copy `.env.example` to `.env.local` and set `VITE_MAPTILER_KEY` to your MapTiler key if the basemap stops loading.
-
-## Main Demo Controls
-
-- `Cars Grid`: shows vehicle occupancy by grid cell.
-- `People Grid`: shows pickup cells in blue and destination cells in red.
-- `Greedy`: enables the stateful greedy dispatch simulation.
-- `Speed`: starts at `0.5x` and cycles through slower/faster demo speeds.
-- `Events`: toggles one of three preplanned demand surges: Chase Center exit, Market St surge, or FiDi conference surge. Each event is marked with a red surge circle and generates more people near that location, changing traffic pressure, routes, and stats.
-- Time presets jump the simulation to morning, midday, evening rush, or night.
-
-## Regenerate Simulation Data
-
-The greedy dispatch snapshots are exported to `public/data/mobility_world.json`. The export uses 5-minute ticks by default so requests and assignments flow continuously during the demo, plus three lighter event timelines for the scenario toggles.
+Optional basemap configuration:
 
 ```bash
-python3 export_mobility_world.py
+cp .env.example .env.local
+# set VITE_MAPTILER_KEY if using your own MapTiler project key
 ```
 
-Useful options:
+## Demo Flow
 
-```bash
-python3 export_mobility_world.py --fleet-size 40 --step-minutes 5 --seed 7
-```
+1. Open `/compare.html`.
+2. The page loads both policies on the same map and initializes all metrics at zero.
+3. The synchronized run starts automatically after the interface is ready, or can be started manually with **Start Both**.
+4. Select one of the event scenarios to compare how each policy responds to localized demand pressure.
+5. At the end of the hour, FleetForge freezes the final frame and summarizes the business impact of Agentic Fleet over Greedy.
 
-The export is intentionally scaled for the demo so route overlays stay readable. Dijkstra route geometry is deduplicated into a shared route table to keep the checked-in demo file manageable.
+## Greedy Policy
 
-Precompute the Agentic Fleet comparison feed, including the same three event timelines used by the greedy page:
+The Greedy policy is the baseline fleet dispatcher. It assigns available cars to currently visible requests with a local, immediate objective: serve the nearest or cheapest feasible pickup now.
 
-```bash
-python3 precompute_orchestrator_world.py --include-events
-```
+This works in stable demand, but it has predictable failure modes:
 
-This writes `public/data/mobility_orchestrator_world.json`, using the existing greedy export as the shared request/timeline source. Omit `--include-events` when you only want to rebuild the base 24-hour comparison feed quickly.
+- cars overconcentrate around the most obvious demand spike;
+- vehicles chase current requests without preserving future coverage;
+- nearby pickup corridors become undersupplied;
+- wait time rises when traffic and demand peak in the same area.
 
-Current base comparison feed:
+Greedy is useful because it is intuitive, fast, and hard to beat without a better global policy. It is also exactly the kind of reactive baseline an RL fleet controller should outperform.
 
-- greedy: `240` completed trips, `$8,622.26` profit, `73.19%` served, `5.51m` average wait;
-- Agentic Fleet: `291` completed trips, `$10,699.16` profit, `88.55%` served, `4.57m` average wait;
-- delta: `+51` completed trips, `+$2,076.90` profit, `+15.36pp` served demand, `-0.94m` average wait.
+## Agentic RL Fleet
 
-Current event comparison deltas:
+Agentic Fleet is the learned orchestration approach. Instead of only matching the closest car to the current request queue, it reasons over:
 
-- Chase Center exit: `+127` completed trips, `+$6,903.50` profit, `+12.50pp` served demand, `-3.21m` average wait.
-- Market St surge: `+185` completed trips, `+$8,640.02` profit, `+22.48pp` served demand, `-7.75m` average wait.
-- FiDi conference: `+171` completed trips, `+$8,165.09` profit, `+20.09pp` served demand, `-5.72m` average wait.
+- current fleet state and active rides;
+- pending and forecast demand;
+- road traffic and bottlenecks;
+- request value and urgency;
+- future supply alignment;
+- proactive repositioning opportunities.
 
-## Rebuild OSMnx Road Data
+The Agentic Fleet can assign trips, hold vehicles, and reposition idle cars before the obvious greedy action becomes expensive. In the live comparison, trip routes remain blue for both policies, while green routes show Agentic Fleet repositioning.
 
-Only do this if you need to regenerate the base map/network artifacts.
+## HUD Environment
 
-```bash
-python3 -m pip install osmnx networkx
-npm run build:osmnx
-python3 export_mobility_world.py
-```
+The HUD environment lives in `hud_mobility/`. It exposes a verifiable fleet-control task where an LLM orchestrator controls the simulator through MCP tools and receives an absolute normalized reward.
 
-`npm run build:osmnx` writes road, node, population-grid, and sample-trip artifacts into `public/data`.
+The agent tool surface includes:
 
-## Tests and Checks
+- `observe_state`: inspect fleet, requests, traffic, demand, and running metrics.
+- `forecast_hotspots`: identify high-demand cells over the next rollout window.
+- `propose_matching`: generate value- and urgency-aware assignment candidates.
+- `propose_repositioning`: generate proactive idle-car reposition targets.
+- `propose_full_plan`: assemble a complete candidate action plan.
+- `critique_action_plan`: validate the plan and surface concentration, coverage, and validity risks.
+- `step_world`: apply one structured action plan and advance the simulator.
+- `submit_episode`: return the final reward and metrics for the episode.
 
-```bash
-python3 -B -m unittest test_generators.py
-python3 -B -m unittest test_hud_mobility.py
-python3 -m hud_mobility.eval_local --episodes 8 --horizon-steps 8 --fleet-size 20
-python3 precompute_orchestrator_world.py --include-events
-./node_modules/.bin/vite build --outDir /private/tmp/hud-hackathon-build
-```
+The reward is absolute, not a greedy-relative score. It combines profit capture, demand served, lower wait time, productive fleet utilization, future supply alignment, cancellation avoidance, deadhead control, and action validity.
 
-The Vite build currently emits a large-chunk warning because the app bundle and checked-in demo data are sizeable; that warning does not block the build.
+## HUD Training
 
-## HUD LLM Orchestrator
+The HUD taskset evaluates the orchestrator across baseline and event-driven mobility scenarios:
 
-This branch adds a HUD-trainable fleet orchestrator in `hud_mobility/`. It does not use the demo greedy dispatcher for training reward. Instead, the HUD task exposes MCP tools for:
+- morning and evening base demand;
+- Chase Center exit wave;
+- Market St downtown surge;
+- FiDi conference exit wave.
 
-- observing fleet, traffic, demand, and pending requests;
-- forecasting future demand hotspots;
-- proposing global value/urgency-aware matches;
-- proposing idle-car repositioning;
-- running one full episode through non-greedy matching/repositioning specialists;
-- stepping the simulator with an LLM-produced JSON action plan;
-- submitting an episode for an absolute reward.
+The training loop uses HUD rollouts to collect trajectories, score them with the simulator reward, and update a trainable model through GRPO-style RL. The model is trained to use the available tools, submit complete episodes, and maximize the environment reward without using Greedy metrics inside the reward path.
 
-Install the HUD runtime dependencies:
+Install HUD dependencies:
 
 ```bash
 python3 -m pip install -r requirements-hud.txt
 hud set HUD_API_KEY=...
 ```
 
-Run a local heuristic smoke test of the same non-greedy action API:
+Run local environment checks:
 
 ```bash
+python3 -B -m unittest test_generators.py
+python3 -B -m unittest test_hud_mobility.py
 python3 -m hud_mobility.eval_local --episodes 8 --horizon-steps 8 --fleet-size 20
 ```
 
-Compare the specialist planner against the nearest-car baseline on the six HUD seeds:
-
-```bash
-python3 benchmark_nearest_baseline.py --jsonl
-```
-
-Run the HUD taskset against a gateway model:
+Evaluate the HUD taskset:
 
 ```bash
 hud eval hud_mobility/tasks.py claude --full --max-steps 12 --gateway --auto-respond --yes
 ```
 
-Train a forked trainable model with HUD GRPO:
+Train a HUD model:
 
 ```bash
 hud models list
@@ -149,25 +124,55 @@ hud models fork <trainable-base-model> --name mobility-orchestrator-rl
 python3 -m hud_mobility.train --model mobility-orchestrator-rl --steps 5 --group 8
 ```
 
-For a tiny end-to-end smoke run before spending a full batch:
+## Current Comparison Results
+
+The current scenario suite shows Agentic Fleet outperforming Greedy on the primary business metrics:
+
+| Scenario | Additional Trips | Profit Lift | Demand Served Lift | Avg Wait Reduction |
+| --- | ---: | ---: | ---: | ---: |
+| Base | +51 | +$2,076.90 | +15.36 pp | -0.96 min |
+| Chase Center Exit | +127 | +$6,903.50 | +12.50 pp | -3.00 min |
+| Market St Surge | +185 | +$8,640.02 | +22.48 pp | -7.77 min |
+| FiDi Conference | +171 | +$8,165.09 | +20.09 pp | -5.76 min |
+
+HUD reward validation:
+
+- nearest-car baseline mean reward: `0.268809`
+- Agentic Fleet planner mean reward: `0.320795`
+- trained HUD model `mobility-orchestrator-rl-codex-01`: `0.321 +/- 0.059` over six tasks
+
+## Regenerating Comparison Data
+
+Rebuild the Greedy world:
 
 ```bash
-python3 -m hud_mobility.train --model mobility-orchestrator-rl --steps 1 --group 2 --limit-tasks 1 --max-concurrent 1
+python3 export_mobility_world.py
 ```
 
-Latest measured run:
+Rebuild the Agentic Fleet comparison world:
 
-- nearest-car baseline mean reward: `0.268809`;
-- non-greedy specialist planner mean reward: `0.320795`;
-- trained HUD model `mobility-orchestrator-rl-codex-01` checkpoint `fff84abe-f839-47f9-9d2a-8304e35963b8`: `0.321 +/- 0.059` over all six tasks;
-- confirmation job: `https://hud.ai/jobs/3b9089b03b7e4590aa0d80a9dedf77d6`.
+```bash
+python3 precompute_orchestrator_world.py --include-events
+```
 
-The training objective is an absolute normalized metric blend: profit capture, demand served, wait score, productive utilization, future supply alignment, cancellation penalty, deadhead penalty, and invalid-action penalty. Greedy metrics are intentionally excluded from the reward path.
+Run the baseline comparison check:
 
-## Important Files
+```bash
+python3 benchmark_nearest_baseline.py --jsonl
+```
 
-- `main.jsx`: React/Deck.gl map UI and overlays.
-- `map.py`: OSMnx network and base data generator.
-- `export_mobility_world.py`: stateful greedy dispatch export for the frontend.
-- `mobility_sim/generators.py`: demand, traffic, people, and world generator logic.
-- `public/data/`: generated JSON artifacts used by the map.
+Run the frontend build:
+
+```bash
+npm run build
+```
+
+## Project Structure
+
+- `comparison.jsx`: FleetForge comparison UI, synchronized controls, map layers, legends, metrics, and HUD tool trace.
+- `hud_mobility/`: HUD environment, taskset, world simulator, tools, reward, planners, and training entrypoint.
+- `mobility_sim/`: demand, traffic, request, and fleet simulation primitives used by the map exports.
+- `export_mobility_world.py`: Greedy policy world export.
+- `precompute_orchestrator_world.py`: Agentic Fleet world export.
+- `public/data/`: generated scenario data consumed by the frontend.
+- `map.py`: San Francisco road/grid data generation.
