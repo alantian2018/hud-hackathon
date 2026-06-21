@@ -204,6 +204,10 @@ function elapsedSeconds(snapshot, clockMinute, stepMinutes) {
   return clamp(clockMinute - start, 0, Math.max(1, stepMinutes)) * 60;
 }
 
+function jobElapsedSeconds(job, car, snapshot, clockMinute, stepMinutes) {
+  return Number(car?.route_elapsed ?? job?.route_elapsed ?? 0) + elapsedSeconds(snapshot, clockMinute, stepMinutes);
+}
+
 function resolveRoute(route, routeIndex) {
   if (!route) return null;
   if (Array.isArray(route.coordinates)) return route;
@@ -276,7 +280,7 @@ function activeJobs(snapshot) {
 function jobProgress(job, car, snapshot, clockMinute, stepMinutes) {
   const routeCost = Number(job?.route?.cost ?? job?.total_cost ?? 0);
   if (!routeCost) return 0;
-  const elapsed = Number(car?.route_elapsed ?? job.route_elapsed ?? 0) + elapsedSeconds(snapshot, clockMinute, stepMinutes);
+  const elapsed = jobElapsedSeconds(job, car, snapshot, clockMinute, stepMinutes);
   return clamp(elapsed / routeCost, 0, 1);
 }
 
@@ -287,12 +291,21 @@ function animatedCars(snapshot, routeIndex, clockMinute, stepMinutes) {
     const job = jobByCar.get(car.id);
     const route = resolveRoute(job?.route, routeIndex);
     const coordinates = route?.coordinates ?? [];
+    const elapsed = jobElapsedSeconds(job, car, snapshot, clockMinute, stepMinutes);
+    const pickupCost = Number(job?.pickup_route?.cost ?? 0);
     const progress = job && routeCoordinatesAreUsable(coordinates)
       ? jobProgress(job, car, snapshot, clockMinute, stepMinutes)
       : 0;
     return {
       ...car,
       active_job_kind: job?.kind,
+      status: job?.kind === "reposition"
+        ? "repositioning"
+        : job?.kind === "trip"
+        ? elapsed < pickupCost
+          ? "to_pickup"
+          : "to_dropoff"
+        : car.status,
       position: job && routeCoordinatesAreUsable(coordinates)
         ? pointAlongRoute(coordinates, progress) ?? car.position
         : car.position
@@ -326,17 +339,41 @@ function makeRouteFeatures(snapshot, routeIndex, clockMinute, stepMinutes, inclu
   return {type: "FeatureCollection", features};
 }
 
-function makePeopleFeatures(snapshot) {
+function activeAssignmentContext(snapshot) {
+  const assignments = snapshot?.map_dispatch?.assignments ?? [];
+  const carById = new Map((snapshot?.map_dispatch?.cars ?? []).map(car => [car.id, car]));
+  return {
+    assignmentByPersonId: new Map(assignments.map(assignment => [assignment.person_id, assignment])),
+    carById
+  };
+}
+
+function visibleMarkerKinds(person, assignment, car, snapshot, clockMinute, stepMinutes) {
+  if (!assignment) return {pickup: true, dropoff: true};
+  const elapsed = jobElapsedSeconds(assignment, car, snapshot, clockMinute, stepMinutes);
+  const pickupCost = Number(assignment.pickup_route?.cost ?? 0);
+  const routeCost = Number(assignment.route?.cost ?? assignment.total_cost ?? 0);
+  return {
+    pickup: elapsed < pickupCost,
+    dropoff: elapsed < routeCost
+  };
+}
+
+function makePeopleFeatures(snapshot, clockMinute, stepMinutes) {
   const features = [];
+  const {assignmentByPersonId, carById} = activeAssignmentContext(snapshot);
   for (const person of snapshot?.map_people ?? []) {
-    if (person.pickup_position) {
+    const assignment = assignmentByPersonId.get(person.id);
+    const car = assignment ? carById.get(assignment.car_id) : null;
+    const visible = visibleMarkerKinds(person, assignment, car, snapshot, clockMinute, stepMinutes);
+    if (person.pickup_position && visible.pickup) {
       features.push({
         type: "Feature",
         geometry: {type: "Point", coordinates: person.pickup_position},
         properties: {kind: "pickup", person_id: person.id, status: person.status}
       });
     }
-    if (person.dropoff_position) {
+    if (person.dropoff_position && visible.dropoff) {
       features.push({
         type: "Feature",
         geometry: {type: "Point", coordinates: person.dropoff_position},
@@ -427,9 +464,10 @@ function makeCarPresenceGridFeatureCollection(grid, cars, nodeCountsByCell) {
   const presence = new Map();
   for (const car of cars ?? []) {
     const providedCell = car.grid_cell ?? car.grid_position;
-    const cell = providedCell
+    const cellFromPosition = gridCellForPosition(car.position, grid);
+    const cell = cellFromPosition ?? (providedCell
       ? {row: providedCell[0], col: providedCell[1], key: gridKey(providedCell[0], providedCell[1])}
-      : gridCellForPosition(car.position, grid);
+      : null);
     if (!cell) continue;
     const current = presence.get(cell.key) ?? {
       row: cell.row,
@@ -465,7 +503,7 @@ function makeCarPresenceGridFeatureCollection(grid, cars, nodeCountsByCell) {
   };
 }
 
-function makePeopleGridFeatureCollection(snapshot, grid) {
+function makePeopleGridFeatureCollection(snapshot, grid, clockMinute, stepMinutes) {
   const collection = makeGridFeatureCollection(grid);
   if (!collection) return null;
   const cells = new Map();
@@ -494,9 +532,13 @@ function makePeopleGridFeatureCollection(snapshot, grid) {
     }
     cells.set(key, current);
   };
+  const {assignmentByPersonId, carById} = activeAssignmentContext(snapshot);
   for (const person of snapshot?.map_people ?? []) {
-    register(person.pickup_grid_cell ?? person.origin, "pickup", person);
-    register(person.dropoff_grid_cell ?? person.destination, "dropoff", person);
+    const assignment = assignmentByPersonId.get(person.id);
+    const car = assignment ? carById.get(assignment.car_id) : null;
+    const visible = visibleMarkerKinds(person, assignment, car, snapshot, clockMinute, stepMinutes);
+    if (visible.pickup) register(person.pickup_grid_cell ?? person.origin, "pickup", person);
+    if (visible.dropoff) register(person.dropoff_grid_cell ?? person.destination, "dropoff", person);
   }
   return {
     ...collection,
@@ -574,6 +616,23 @@ function avgWaitMinutes(stats) {
   return Number(stats?.wait_time_min ?? 0) / Math.max(1, completed, servedByPct);
 }
 
+function deadheadMinutes(snapshot, clockMinute, stepMinutes) {
+  const carById = new Map((snapshot?.map_dispatch?.cars ?? []).map(car => [car.id, car]));
+  let totalSeconds = 0;
+  for (const job of activeJobs(snapshot)) {
+    const car = carById.get(job.car_id);
+    const elapsed = jobElapsedSeconds(job, car, snapshot, clockMinute, stepMinutes);
+    if (job.kind === "reposition") {
+      const routeCost = Number(job.route?.cost ?? job.total_cost ?? 0);
+      totalSeconds += clamp(elapsed, 0, routeCost);
+      continue;
+    }
+    const pickupCost = Number(job.pickup_route?.cost ?? 0);
+    totalSeconds += clamp(elapsed, 0, pickupCost);
+  }
+  return totalSeconds / 60.0;
+}
+
 function metricDelta(rl, greedy, key, lowerIsBetter = false) {
   const a = Number(rl?.[key] ?? 0);
   const b = Number(greedy?.[key] ?? 0);
@@ -607,14 +666,15 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
     [nodes, grid]
   );
   const carGridData = useMemo(
-    () => makeCarPresenceGridFeatureCollection(grid, snapshot?.map_dispatch?.cars ?? [], nodeCountsByCell),
-    [grid, snapshot, nodeCountsByCell]
+    () => makeCarPresenceGridFeatureCollection(grid, cars, nodeCountsByCell),
+    [grid, cars, nodeCountsByCell]
   );
   const peopleGridData = useMemo(
-    () => makePeopleGridFeatureCollection(snapshot, grid),
-    [snapshot, grid]
+    () => makePeopleGridFeatureCollection(snapshot, grid, clockMinute, stepMinutes),
+    [snapshot, grid, clockMinute, stepMinutes]
   );
   const metrics = metricsFor(snapshot, policy.id);
+  const deadhead = deadheadMinutes(snapshot, clockMinute, stepMinutes);
   const currentHour = Math.floor(clamp(clockMinute, 0, DAY_MINUTES - 1) / 60);
   const layers = useMemo(() => {
     const roads = network
@@ -700,7 +760,7 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
     });
     const people = new GeoJsonLayer({
       id: `${policy.id}-people`,
-      data: makePeopleFeatures(snapshot),
+      data: makePeopleFeatures(snapshot, clockMinute, stepMinutes),
       stroked: true,
       filled: true,
       pointType: "circle",
@@ -821,6 +881,7 @@ function MapPanel({policy, world, network, grid, nodes, snapshot, routeIndex, cl
           <Metric label="Revenue" value={formatMoney(metrics.revenue)} />
           <Metric label="Demand" value={formatPct(metrics.demand_served_pct)} />
           <Metric label="Avg Wait" value={`${avgWaitMinutes(metrics).toFixed(1)}m`} />
+          <Metric label="Deadhead" value={`${deadhead.toFixed(1)}m`} />
           <Metric label="Util." value={formatPct(metrics.avg_fleet_utilization_pct ?? metrics.fleet_utilization_pct)} />
           <Metric label="Active" value={Number(metrics.active_cars ?? 0).toLocaleString()} />
         </div>
@@ -843,7 +904,7 @@ function Metric({label, value}) {
   );
 }
 
-function DeltaBar({greedySnapshot, rlSnapshot}) {
+function DeltaBar({greedySnapshot, rlSnapshot, greedyDeadhead, rlDeadhead}) {
   const greedy = metricsFor(greedySnapshot, "greedy");
   const rl = metricsFor(rlSnapshot, "rl");
   const trips = metricDelta(rl, greedy, "completed_trips");
@@ -853,12 +914,17 @@ function DeltaBar({greedySnapshot, rlSnapshot}) {
     delta: avgWaitMinutes(rl) - avgWaitMinutes(greedy),
     good: avgWaitMinutes(rl) < avgWaitMinutes(greedy)
   };
+  const deadhead = {
+    delta: Number(rlDeadhead ?? 0) - Number(greedyDeadhead ?? 0),
+    good: Number(rlDeadhead ?? 0) < Number(greedyDeadhead ?? 0)
+  };
   return (
     <div style={{display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap", fontSize: 13}}>
       <Delta label="Trips" value={trips.delta} good={trips.good} />
       <Delta label="Revenue" value={revenue.delta} good={revenue.good} money />
       <Delta label="Demand" value={demand.delta} good={demand.good} suffix="pp" />
       <Delta label="Avg Wait" value={avgWait.delta} good={avgWait.good} suffix="m" />
+      <Delta label="Deadhead" value={deadhead.delta} good={deadhead.good} suffix="m" />
     </div>
   );
 }
@@ -921,6 +987,8 @@ function ControlBar({
   clockLabel,
   greedySnapshot,
   rlSnapshot,
+  greedyDeadhead,
+  rlDeadhead,
   compare,
   events,
   activeEventId,
@@ -943,7 +1011,14 @@ function ControlBar({
       <div style={{display: "flex", flexDirection: "column", gap: 4}}>
         <div style={{fontSize: 12, opacity: 0.66}}>{compare ? "Synchronized comparison" : "RL policy page"}</div>
         <div style={{fontSize: 20, fontWeight: 850}}>{compare ? "Greedy vs RL Fleet Dispatch" : "RL Fleet Orchestrator"}</div>
-        {compare && <DeltaBar greedySnapshot={greedySnapshot} rlSnapshot={rlSnapshot} />}
+        {compare && (
+          <DeltaBar
+            greedySnapshot={greedySnapshot}
+            rlSnapshot={rlSnapshot}
+            greedyDeadhead={greedyDeadhead}
+            rlDeadhead={rlDeadhead}
+          />
+        )}
       </div>
       <div style={{display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 8}}>
         <div style={{display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", justifyContent: "flex-end"}}>
@@ -1083,6 +1158,8 @@ function ComparisonShell({compare}) {
 
   const greedySnapshot = snapshotAt(greedySnapshots, clockMinute);
   const rlSnapshot = snapshotAt(rlSnapshots, clockMinute);
+  const greedyDeadhead = deadheadMinutes(greedySnapshot, clockMinute, greedyStep);
+  const rlDeadhead = deadheadMinutes(rlSnapshot, clockMinute, rlStep);
   const onStart = () => {
     if (clockMinute >= endMinute - 0.01) setClockMinute(PRE_FRAME_MINUTE);
     setRunning(true);
@@ -1109,6 +1186,8 @@ function ComparisonShell({compare}) {
         clockLabel={formatClock(clockMinute)}
         greedySnapshot={greedySnapshot}
         rlSnapshot={rlSnapshot}
+        greedyDeadhead={greedyDeadhead}
+        rlDeadhead={rlDeadhead}
         compare={compare}
         events={events}
         activeEventId={activeEventId}
