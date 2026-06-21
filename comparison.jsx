@@ -1361,7 +1361,7 @@ function ControlBar({
           }} />
           <div style={{minWidth: 0}}>
             <div style={{fontSize: 34, fontWeight: 950, lineHeight: 0.95, letterSpacing: 0}}>
-              FleetForge
+              FleetForge Demo
             </div>
             <div style={{fontSize: 13, opacity: 0.72, marginTop: 7, fontWeight: 720}}>
               Training AI agents to operate real-world fleets before they touch the real world

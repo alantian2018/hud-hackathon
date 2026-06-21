@@ -1953,7 +1953,7 @@ function App() {
         </a>
 
         <a href="/" style={{...controlButtonStyle, textDecoration: "none"}}>
-          FleetForge
+          FleetForge Demo
         </a>
 
         <button
