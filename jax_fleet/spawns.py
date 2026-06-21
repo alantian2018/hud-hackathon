@@ -60,12 +60,13 @@ def build_js_visual_request_schedule(
 ) -> RequestSchedule:
     world = _load_json(Path(data_dir) / "mobility_world.json")
     start = float(start_time_seconds)
-    end = start + float(episode_seconds)
+    day_seconds = 24.0 * 60.0 * 60.0
+    requested_duration = float(episode_seconds)
+    end = start + (requested_duration if np.isfinite(requested_duration) else day_seconds)
     rows = np.asarray(graph.node_grid_rows)
     cols = np.asarray(graph.node_grid_cols)
 
     records: list[tuple[float, int, int, float]] = []
-    day_seconds = 24.0 * 60.0 * 60.0
     first_day = int(np.floor(start / day_seconds)) - 1
     last_day = int(np.ceil(end / day_seconds)) + 1
     for day in range(first_day, last_day + 1):
