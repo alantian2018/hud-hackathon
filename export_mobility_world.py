@@ -2,13 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import heapq
 import json
 import math
 from pathlib import Path
 import random
 
-from mobility_sim import DemandGenerator, PeopleGenerator, TrafficGenerator, build_people_grid
+from mobility_sim import DemandGenerator, PeopleGenerator, TrafficGenerator
 
 
 MAX_ROUTE_SEGMENT_METERS = 350.0
@@ -249,6 +250,50 @@ def route_is_usable(route: dict) -> bool:
         distance_m(coords[idx], coords[idx + 1]) <= MAX_ROUTE_SEGMENT_METERS
         for idx in range(len(coords) - 1)
     )
+
+
+def route_reference(route: dict, route_registry: dict[str, dict]) -> dict:
+    route_payload = {
+        "coordinates": route.get("coordinates") or [],
+        "cost": round(float(route.get("cost", 0.0)), 6),
+        "fallback": bool(route.get("fallback", False)),
+    }
+    route_id = "route-" + hashlib.sha1(
+        json.dumps(route_payload, separators=(",", ":"), allow_nan=False).encode("utf-8")
+    ).hexdigest()[:16]
+    route_registry.setdefault(route_id, route_payload)
+    return {
+        "id": route_id,
+        "cost": route_payload["cost"],
+        "fallback": route_payload["fallback"],
+    }
+
+
+def assignment_for_export(assignment: dict, route_registry: dict[str, dict]) -> dict:
+    exported = {
+        key: value
+        for key, value in assignment.items()
+        if key not in {"pickup_route", "dropoff_route", "route"}
+    }
+    for key in ("pickup_route", "dropoff_route", "route"):
+        if assignment.get(key):
+            exported[key] = route_reference(assignment[key], route_registry)
+    return exported
+
+
+def dispatch_for_export(dispatch: dict, route_registry: dict[str, dict]) -> dict:
+    return {
+        "assignments": [
+            assignment_for_export(assignment, route_registry)
+            for assignment in dispatch.get("assignments", [])
+        ],
+        "new_assignments": [
+            assignment_for_export(assignment, route_registry)
+            for assignment in dispatch.get("new_assignments", [])
+        ],
+        "cars": dispatch.get("cars", []),
+        "summary": dispatch.get("summary", {}),
+    }
 
 
 class StatefulMapDispatch:
@@ -570,7 +615,7 @@ def main() -> None:
     parser.add_argument("--out", default="public/data/mobility_world.json")
     parser.add_argument("--seed", default=7, type=int)
     parser.add_argument("--fleet-size", default=40, type=int)
-    parser.add_argument("--step-minutes", default=15, type=int)
+    parser.add_argument("--step-minutes", default=5, type=int)
     args = parser.parse_args()
 
     grid = load_grid(Path(args.grid))
@@ -587,47 +632,50 @@ def main() -> None:
         candidate_limit=6,
     )
     snapshots = []
-    step_seconds = max(1, args.step_minutes) * 60
-    for timestep in range(0, 24 * 60, max(1, args.step_minutes)):
+    route_registry: dict[str, dict] = {}
+    step_minutes = max(1, args.step_minutes)
+    step_seconds = step_minutes * 60
+    arrival_window = step_minutes / 15.0
+    base_arrival_rate = 2.8 * arrival_window
+    max_new_people = max(2, round(6 * arrival_window))
+    for timestep in range(0, 24 * 60, step_minutes):
         demand = DemandGenerator(grid=grid, seed=args.seed + timestep + 1)
         traffic = TrafficGenerator(grid=grid, seed=args.seed + timestep + 2)
         people_generator = PeopleGenerator(
             grid=grid,
             seed=args.seed + timestep + 3,
-            base_arrival_rate=2.8,
-            max_new_people_per_tick=6,
+            base_arrival_rate=base_arrival_rate,
+            max_new_people_per_tick=max_new_people,
         )
         demand_heatmap = demand.get_heatmap(timestep)
         traffic_heatmap = traffic.get_heatmap(timestep, demand_heatmap)
         people = people_generator.generate(timestep, demand_heatmap, traffic_heatmap)
         map_payload = dispatcher.step(timestep, people)
         greedy_stats = map_payload["map_greedy_stats"]
+        map_dispatch = dispatch_for_export(map_payload["map_dispatch"], route_registry)
         snapshot = {
             "timestep": timestep,
-            "demand_heatmap": demand_heatmap,
-            "traffic_heatmap": traffic_heatmap,
             "new_people": [person.to_dict() for person in people],
-            "people_grid": build_people_grid(grid, people),
-            "dispatch": map_payload["map_dispatch"],
-            "greedy_stats": greedy_stats,
             "summary": {
                 "num_new_people": len(people),
                 "top_demand_cells": demand.top_demand_cells(5, timestep),
                 "traffic_bottlenecks": traffic.top_bottlenecks(5, timestep, demand_heatmap),
-                "dispatch": map_payload["map_dispatch"]["summary"],
+                "dispatch": map_dispatch["summary"],
                 "greedy_stats": greedy_stats,
             },
+            "map_dispatch": map_dispatch,
+            "map_people": map_payload["map_people"],
+            "map_greedy_stats": greedy_stats,
         }
-        snapshot["map_people"] = map_payload["map_people"]
-        snapshot["map_dispatch"] = map_payload["map_dispatch"]
-        snapshot["map_greedy_stats"] = greedy_stats
         snapshots.append(snapshot)
         dispatcher.advance(step_seconds)
 
     payload = {
         "seed": args.seed,
         "fleet_size": args.fleet_size,
-        "step_minutes": args.step_minutes,
+        "step_minutes": step_minutes,
+        "route_segment_max_meters": MAX_ROUTE_SEGMENT_METERS,
+        "routes": route_registry,
         "snapshots": snapshots,
     }
     out_path = Path(args.out)

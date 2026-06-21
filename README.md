@@ -34,12 +34,12 @@ The MapTiler key currently lives at the top of `main.jsx` as `MAPTILER_KEY`. Rep
 - `Cars Grid`: shows vehicle occupancy by grid cell.
 - `People Grid`: shows pickup cells in blue and destination cells in red.
 - `Greedy`: enables the stateful greedy dispatch simulation.
-- `Fast Forward`: changes simulated playback speed.
+- `Speed`: changes simulated playback speed from `0.1x` up to fast-forward.
 - Time presets jump the simulation to morning, midday, evening rush, or night.
 
 ## Regenerate Simulation Data
 
-The greedy dispatch, demand, traffic, and people snapshots are exported to `public/data/mobility_world.json`.
+The greedy dispatch snapshots are exported to `public/data/mobility_world.json`. The export uses 5-minute ticks by default so requests and assignments flow continuously during the demo.
 
 ```bash
 python3 export_mobility_world.py
@@ -48,10 +48,10 @@ python3 export_mobility_world.py
 Useful options:
 
 ```bash
-python3 export_mobility_world.py --fleet-size 40 --step-minutes 15 --seed 7
+python3 export_mobility_world.py --fleet-size 40 --step-minutes 5 --seed 7
 ```
 
-The export is intentionally scaled for the demo so route overlays stay readable. The default generated file is large because it includes full Dijkstra route coordinates for playback.
+The export is intentionally scaled for the demo so route overlays stay readable. Dijkstra route geometry is deduplicated into a shared route table to keep the checked-in demo file manageable.
 
 ## Rebuild OSMnx Road Data
 
