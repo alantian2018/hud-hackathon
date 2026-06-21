@@ -32,6 +32,7 @@ class JaxFleetEnv:
         max_requests: int = 64,
         initial_car_nodes: list[int] | np.ndarray | None = None,
         spawn_rate_per_minute: float = 0.0,
+        assignment_max_route_edges: int = 6,
         episode_seconds: float = 1800.0,
         start_time_seconds: float = 0.0,
         render_width: int = 1280,
@@ -46,6 +47,7 @@ class JaxFleetEnv:
             max_requests=max_requests,
             initial_car_nodes=initial_car_nodes,
             spawn_rate_per_minute=spawn_rate_per_minute,
+            assignment_max_route_edges=assignment_max_route_edges,
             episode_seconds=episode_seconds,
             start_time_seconds=start_time_seconds,
         )
@@ -185,6 +187,7 @@ def main(argv: list[str] | None = None) -> int:
         max_requests=args.max_requests,
         initial_car_nodes=initial_nodes,
         spawn_rate_per_minute=args.spawn_rate_per_minute,
+        assignment_max_route_edges=args.assignment_max_route_edges,
         episode_seconds=args.episode_seconds,
         start_time_seconds=args.start_time_seconds,
     )
@@ -249,6 +252,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--max-cars", type=int, default=40)
     parser.add_argument("--max-requests", type=int, default=32)
+    parser.add_argument("--assignment-max-route-edges", type=int, default=6)
     parser.add_argument("--spawn-rate-per-minute", type=float, default=0.0)
     parser.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
     parser.add_argument("--episode-seconds", type=float, default=float("inf"))

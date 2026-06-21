@@ -28,6 +28,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--num-updates", default=1, type=int)
     train_parser.add_argument("--max-cars", default=1, type=int)
     train_parser.add_argument("--max-requests", default=16, type=int)
+    train_parser.add_argument("--assignment-max-route-edges", default=6, type=int)
     train_parser.add_argument("--episode-seconds", default=3600.0, type=float)
     train_parser.add_argument("--spawn-rate-per-minute", default=0.0, type=float)
     train_parser.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
@@ -47,6 +48,7 @@ def build_parser() -> argparse.ArgumentParser:
     benchmark.add_argument("--steps", default=256, type=int)
     benchmark.add_argument("--max-cars", default=1, type=int)
     benchmark.add_argument("--max-requests", default=16, type=int)
+    benchmark.add_argument("--assignment-max-route-edges", default=6, type=int)
     benchmark.add_argument("--episode-seconds", default=3600.0, type=float)
     benchmark.add_argument("--spawn-rate-per-minute", default=0.0, type=float)
     benchmark.add_argument("--spawn-source", choices=["uniform", "density", "js-visual"], default=None)
@@ -89,6 +91,7 @@ def main(argv: list[str] | None = None) -> int:
             num_updates=args.num_updates,
             max_cars=args.max_cars,
             max_requests=args.max_requests,
+            assignment_max_route_edges=args.assignment_max_route_edges,
             episode_seconds=args.episode_seconds,
             spawn_rate_per_minute=args.spawn_rate_per_minute,
             spawn_source=args.spawn_source,
@@ -111,6 +114,7 @@ def main(argv: list[str] | None = None) -> int:
             num_envs=args.num_envs,
             max_cars=args.max_cars,
             max_requests=args.max_requests,
+            assignment_max_route_edges=args.assignment_max_route_edges,
             episode_seconds=args.episode_seconds,
             spawn_rate_per_minute=args.spawn_rate_per_minute,
             spawn_source=args.spawn_source,

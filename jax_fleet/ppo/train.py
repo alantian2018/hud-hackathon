@@ -34,6 +34,7 @@ class TrainingConfig:
     num_updates: int = 1
     max_cars: int = 1
     max_requests: int = 16
+    assignment_max_route_edges: int = 6
     episode_seconds: float = 3600.0
     spawn_rate_per_minute: float = 0.0
     spawn_source: str | None = None
@@ -112,6 +113,7 @@ def train(config: TrainingConfig, *, graph=None) -> dict[str, Any]:
         max_cars=config.max_cars,
         max_requests=config.max_requests,
         initial_car_nodes=initial_nodes,
+        assignment_max_route_edges=config.assignment_max_route_edges,
         episode_seconds=config.episode_seconds,
         spawn_rate_per_minute=config.spawn_rate_per_minute,
     )
@@ -247,6 +249,7 @@ def benchmark_env_steps(
         max_cars=config.max_cars,
         max_requests=config.max_requests,
         initial_car_nodes=initial_nodes,
+        assignment_max_route_edges=config.assignment_max_route_edges,
         episode_seconds=config.episode_seconds,
         spawn_rate_per_minute=config.spawn_rate_per_minute,
     )

@@ -41,7 +41,9 @@ existing map artifacts. It is separate from the React/Deck.gl frontend.
   spatial Poisson process: counts are clamped to the active-passenger target
   while locations follow the density heatmap.
 - Queued requests are assigned deterministically to the eligible car with the
-  lowest directed ETA.
+  lowest directed ETA, but only after that car's directed route to the request
+  origin is within `assignment_max_route_edges` hops. The default is 6 route
+  edges.
 - Invalid action slots fall back to the first valid outgoing edge and increment
   `metrics.invalid_actions`.
 - Default reward is sparse pickup wait penalty:
@@ -113,6 +115,7 @@ python3 -m jax_fleet.cli train \
   --num-updates 1000 \
   --max-cars 16 \
   --max-requests 256 \
+  --assignment-max-route-edges 6 \
   --spawn-source density \
   --checkpoint-dir runs/jax_fleet/sf/checkpoints \
   --metrics-path runs/jax_fleet/sf/metrics.jsonl

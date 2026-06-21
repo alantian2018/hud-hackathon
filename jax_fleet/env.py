@@ -74,6 +74,7 @@ def make_env_params(
     discount_time_unit_seconds: float = 60.0,
     raster_size: int = 50,
     max_event_steps: int = 512,
+    assignment_max_route_edges: int = 6,
 ) -> EnvParams:
     if initial_car_nodes is None:
         initial = np.zeros((max_cars,), dtype=np.int32)
@@ -114,6 +115,7 @@ def make_env_params(
         raster_size=raster_size,
         max_event_steps=max_event_steps,
         target_active_requests=target_active,
+        assignment_max_route_edges=max(0, int(assignment_max_route_edges)),
         initial_car_nodes=jnp.asarray(initial, dtype=jnp.int32),
         start_time_seconds=jnp.asarray(start_time_seconds, dtype=jnp.float32),
         episode_seconds=jnp.asarray(episode_seconds, dtype=jnp.float32),
@@ -209,10 +211,44 @@ def nearest_eligible_car_by_eta(state: EnvState, request_id, params: EnvParams):
     origin = state.request_origin_nodes[request_id]
     car_nodes = jnp.clip(state.car_nodes, 0, params.graph.num_nodes - 1)
     etas = params.graph.routing_travel_time_s[car_nodes, origin]
-    eligible = state.car_status == CAR_DECISION
+    within_range = _route_within_edge_range(
+        params.graph,
+        car_nodes,
+        origin,
+        params.assignment_max_route_edges,
+    )
+    eligible = (state.car_status == CAR_DECISION) & within_range
     scored = jnp.where(eligible, etas, _INF)
     best = jnp.argmin(scored).astype(jnp.int32)
     return jnp.where(jnp.isfinite(scored[best]) & (scored[best] < _INF / 2.0), best, -1)
+
+
+def _route_within_edge_range(
+    graph: GraphArrays,
+    source_nodes,
+    target_node,
+    max_route_edges: int,
+):
+    target = jnp.clip(jnp.asarray(target_node, dtype=jnp.int32), 0, graph.num_nodes - 1)
+    current = jnp.clip(jnp.asarray(source_nodes, dtype=jnp.int32), 0, graph.num_nodes - 1)
+    reached = current == target
+
+    def body(_, carry):
+        node, done = carry
+        edge_id = graph.routing_next_edge[node, target]
+        can_step = (~done) & (edge_id >= 0)
+        next_node = graph.edge_targets[jnp.clip(edge_id, 0, graph.num_edges - 1)]
+        node = jnp.where(can_step, next_node, node)
+        done = done | (can_step & (node == target))
+        return node, done
+
+    _, reached = jax.lax.fori_loop(
+        0,
+        max(0, int(max_route_edges)),
+        body,
+        (current, reached),
+    )
+    return reached
 
 
 def _apply_policy_action(state: EnvState, action, params: EnvParams) -> EnvState:

@@ -165,6 +165,7 @@ def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -
     assert train_args.graph == "synthetic"
     assert train_args.spawn_source == "uniform"
     assert train_args.num_updates == 2
+    assert train_args.assignment_max_route_edges == 6
 
     routing_args = parser.parse_args(
         [
@@ -194,3 +195,4 @@ def test_cli_parser_exposes_train_and_prepare_routing_commands(tmp_path: Path) -
     assert benchmark_args.command == "benchmark-env"
     assert benchmark_args.steps == 8
     assert benchmark_args.num_envs == 2
+    assert benchmark_args.assignment_max_route_edges == 6

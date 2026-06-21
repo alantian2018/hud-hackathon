@@ -165,6 +165,7 @@ def export_scene(
         "queued_requests": int(np.asarray(state.metrics.queued_requests)),
         "active_requests": active_requests,
         "target_active_requests": int(params.target_active_requests),
+        "assignment_max_route_edges": int(params.assignment_max_route_edges),
         "invalid_actions": int(np.asarray(state.metrics.invalid_actions)),
         "pickup_wait_seconds": float(np.asarray(state.metrics.pickup_wait_seconds)),
         "avg_pickup_wait_last_10_seconds": avg_pickup_wait_last_10,

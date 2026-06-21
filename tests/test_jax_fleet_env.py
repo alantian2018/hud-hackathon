@@ -154,6 +154,52 @@ def test_directed_nearest_car_assignment_uses_eta_not_node_id() -> None:
     assert int(chosen) == 1
 
 
+def test_assignment_requires_car_within_directed_route_edge_range() -> None:
+    graph = build_synthetic_graph(
+        node_lonlat=[(float(i), 0.0) for i in range(8)],
+        edges=[
+            *[
+                {"source": i, "target": i + 1, "travel_time_s": 1.0}
+                for i in range(7)
+            ],
+            {"source": 7, "target": 0, "travel_time_s": 1.0},
+        ],
+    )
+    far_params = make_env_params(
+        graph,
+        max_cars=1,
+        max_requests=2,
+        initial_car_nodes=[0],
+        assignment_max_route_edges=2,
+    )
+    far_state, _ = reset(jax.random.PRNGKey(0), far_params)
+    far_state = far_state.replace(
+        request_status=far_state.request_status.at[0].set(REQUEST_QUEUED),
+        request_origin_nodes=far_state.request_origin_nodes.at[0].set(7),
+        request_dest_nodes=far_state.request_dest_nodes.at[0].set(0),
+        request_spawn_times=far_state.request_spawn_times.at[0].set(0.0),
+    )
+
+    assert int(nearest_eligible_car_by_eta(far_state, jnp.int32(0), far_params)) == -1
+
+    near_params = make_env_params(
+        graph,
+        max_cars=2,
+        max_requests=2,
+        initial_car_nodes=[0, 5],
+        assignment_max_route_edges=2,
+    )
+    near_state, _ = reset(jax.random.PRNGKey(0), near_params)
+    near_state = near_state.replace(
+        request_status=near_state.request_status.at[0].set(REQUEST_QUEUED),
+        request_origin_nodes=near_state.request_origin_nodes.at[0].set(7),
+        request_dest_nodes=near_state.request_dest_nodes.at[0].set(0),
+        request_spawn_times=near_state.request_spawn_times.at[0].set(0.0),
+    )
+
+    assert int(nearest_eligible_car_by_eta(near_state, jnp.int32(0), near_params)) == 1
+
+
 def test_queued_request_waits_until_car_becomes_eligible() -> None:
     params = make_env_params(
         tiny_graph(),
