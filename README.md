@@ -27,6 +27,12 @@ npm run dev
 
 Open the local URL printed by Vite. The npm script starts at `http://127.0.0.1:5173`; if that port is already busy, Vite may use the next available port, such as `5174`.
 
+Pages:
+
+- `/`: existing greedy dispatch map.
+- `/rl.html`: RL/value-aware orchestrator map using the precomputed RL feed.
+- `/compare.html`: greedy and RL maps side by side with one shared Start/Pause/Reset control.
+
 The MapTiler key currently lives at the top of `main.jsx` as `MAPTILER_KEY`. Replace it there if the basemap ever stops loading.
 
 ## Main Demo Controls
@@ -54,6 +60,20 @@ python3 export_mobility_world.py --fleet-size 40 --step-minutes 5 --seed 7
 
 The export is intentionally scaled for the demo so route overlays stay readable. Dijkstra route geometry is deduplicated into a shared route table to keep the checked-in demo file manageable.
 
+Precompute the RL/value-aware comparison feed:
+
+```bash
+python3 precompute_orchestrator_world.py
+```
+
+This writes `public/data/mobility_orchestrator_world.json`, using the existing greedy export as the shared request/timeline source. Add `--include-events` when you want to precompute the event timelines too; the default builds the base 24-hour comparison feed quickly.
+
+Current base comparison feed:
+
+- greedy: `240` completed trips, `$8,622.26` revenue, `73.19%` served, `89` cancellations;
+- RL/value-aware orchestrator: `291` completed trips, `$10,699.16` revenue, `88.55%` served, `38` cancellations;
+- delta: `+51` completed trips, `+$2,076.90` revenue, `+15.36pp` served demand, `-51` cancellations.
+
 ## Rebuild OSMnx Road Data
 
 Only do this if you need to regenerate the base map/network artifacts.
@@ -70,10 +90,73 @@ python3 export_mobility_world.py
 
 ```bash
 python3 -B -m unittest test_generators.py
+python3 -B -m unittest test_hud_mobility.py
+python3 -m hud_mobility.eval_local --episodes 8 --horizon-steps 8 --fleet-size 20
+python3 precompute_orchestrator_world.py
 ./node_modules/.bin/vite build --outDir /private/tmp/hud-hackathon-build
 ```
 
 The Vite build currently emits a large-chunk warning because the app bundle and checked-in demo data are sizeable; that warning does not block the build.
+
+## HUD LLM Orchestrator
+
+This branch adds a HUD-trainable fleet orchestrator in `hud_mobility/`. It does not use the demo greedy dispatcher for training reward. Instead, the HUD task exposes MCP tools for:
+
+- observing fleet, traffic, demand, and pending requests;
+- forecasting future demand hotspots;
+- proposing global value/urgency-aware matches;
+- proposing idle-car repositioning;
+- running one full episode through non-greedy matching/repositioning specialists;
+- stepping the simulator with an LLM-produced JSON action plan;
+- submitting an episode for an absolute reward.
+
+Install the HUD runtime dependencies:
+
+```bash
+python3 -m pip install -r requirements-hud.txt
+hud set HUD_API_KEY=...
+```
+
+Run a local heuristic smoke test of the same non-greedy action API:
+
+```bash
+python3 -m hud_mobility.eval_local --episodes 8 --horizon-steps 8 --fleet-size 20
+```
+
+Compare the specialist planner against the nearest-car baseline on the six HUD seeds:
+
+```bash
+python3 benchmark_nearest_baseline.py --jsonl
+```
+
+Run the HUD taskset against a gateway model:
+
+```bash
+hud eval hud_mobility/tasks.py claude --full --max-steps 12 --gateway --auto-respond --yes
+```
+
+Train a forked trainable model with HUD GRPO:
+
+```bash
+hud models list
+hud models fork <trainable-base-model> --name mobility-orchestrator-rl
+python3 -m hud_mobility.train --model mobility-orchestrator-rl --steps 5 --group 8
+```
+
+For a tiny end-to-end smoke run before spending a full batch:
+
+```bash
+python3 -m hud_mobility.train --model mobility-orchestrator-rl --steps 1 --group 2 --limit-tasks 1 --max-concurrent 1
+```
+
+Latest measured run:
+
+- nearest-car baseline mean reward: `0.268809`;
+- non-greedy specialist planner mean reward: `0.320795`;
+- trained HUD model `mobility-orchestrator-rl-codex-01` checkpoint `fff84abe-f839-47f9-9d2a-8304e35963b8`: `0.321 +/- 0.059` over all six tasks;
+- confirmation job: `https://hud.ai/jobs/3b9089b03b7e4590aa0d80a9dedf77d6`.
+
+The training objective is an absolute normalized metric blend: revenue capture, demand served, wait score, productive utilization, future supply alignment, cancellation penalty, deadhead penalty, and invalid-action penalty. Greedy metrics are intentionally excluded from the reward path.
 
 ## Important Files
 

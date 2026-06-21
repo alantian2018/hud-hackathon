@@ -1,5 +1,11 @@
 .vscode
+.venv-hud
+.hud_eval.toml
 node_modules
 cache
-public
+public/*
+!public/data/
+public/data/*
+!public/data/mobility_world.json
+!public/data/mobility_orchestrator_world.json
 __pycache__

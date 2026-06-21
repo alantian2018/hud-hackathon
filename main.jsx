@@ -98,6 +98,20 @@ function buildStyleUrl() {
   return `https://api.maptiler.com/maps/streets-v2-dark/style.json?key=${MAPTILER_KEY}`;
 }
 
+async function fetchFirstJson(paths) {
+  let lastError = null;
+  for (const path of paths) {
+    try {
+      const response = await fetch(path);
+      if (!response.ok) throw new Error(`${path} ${response.status}`);
+      return await response.json();
+    } catch (error) {
+      lastError = error;
+    }
+  }
+  throw lastError;
+}
+
 function hideBaseTransportationLayers(map) {
   const styleLayers = map.getStyle()?.layers ?? [];
   for (const layer of styleLayers) {
@@ -1096,27 +1110,17 @@ function App() {
 
     async function load() {
       try {
-        const [edgesRes, tripsRes, gridRes, nodesRes] = await Promise.all([
-          fetch("/data/osmnx_edges.geojson"),
-          fetch("/data/sample_trips.json"),
-          fetch("/data/population_density_grid.json"),
-          fetch("/data/ppo_nodes.json")
+        const [edgeData, tripData, gridData, nodeData] = await Promise.all([
+          fetchFirstJson(["/data/osmnx_edges.geojson", "/dist/data/osmnx_edges.geojson"]),
+          fetchFirstJson(["/data/sample_trips.json", "/dist/data/sample_trips.json"]),
+          fetchFirstJson(["/data/population_density_grid.json", "/dist/data/population_density_grid.json"]),
+          fetchFirstJson(["/data/ppo_nodes.json", "/dist/data/ppo_nodes.json"])
         ]);
-        if (!edgesRes.ok || !tripsRes.ok) return;
-
-        const [edgeData, tripData] = await Promise.all([edgesRes.json(), tripsRes.json()]);
         if (cancelled) return;
         setNetwork(edgeData);
         setTrips(Array.isArray(tripData) && tripData.length > 0 ? tripData : FALLBACK_TRIPS);
-
-        if (gridRes.ok) {
-          const gridData = await gridRes.json();
-          if (!cancelled) setPopulationGrid(gridData);
-        }
-        if (nodesRes.ok) {
-          const nodeData = await nodesRes.json();
-          if (!cancelled) setPpoNodes(Array.isArray(nodeData?.nodes) ? nodeData.nodes : []);
-        }
+        setPopulationGrid(gridData);
+        setPpoNodes(Array.isArray(nodeData?.nodes) ? nodeData.nodes : []);
         setDatasetReady(true);
       } catch (_) {
         // fallback remains active; nothing else needed
@@ -1943,6 +1947,14 @@ function App() {
         >
           People Grid: {showPeopleGrid ? "ON" : "OFF"}
         </button>
+
+        <a href="/rl.html" style={{...controlButtonStyle, textDecoration: "none"}}>
+          RL Page
+        </a>
+
+        <a href="/compare.html" style={{...controlButtonStyle, textDecoration: "none"}}>
+          Compare
+        </a>
 
         <button
           type="button"
